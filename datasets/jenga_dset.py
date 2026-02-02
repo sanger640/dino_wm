@@ -6,6 +6,7 @@ from PIL import Image
 from einops import rearrange
 from typing import Callable, Optional, List
 import os
+import time
 
 from .traj_dset import TrajDataset, get_train_val_sliced
 
@@ -30,6 +31,8 @@ class LazyVideo:
 
     def __getitem__(self, item):
         # Handle slicing (e.g., [start:end:step]) provided by TrajSlicerDataset
+        # start_time = time.time()
+        # print("woohoo")
         if isinstance(item, slice):
             start = item.start if item.start is not None else 0
             stop = item.stop if item.stop is not None else len(self)
@@ -77,7 +80,9 @@ class LazyVideo:
             images = rearrange(images, "t v c h w -> (t v) c h w")
             images = self.transform(images)
             images = rearrange(images, "(t v) c h w -> t v c h w", t=t, v=v)
-            
+
+        # print("doneoo")
+        # print(time.time() - start_time)   
         # If single index was requested, remove the time dimension (to behave like a tensor)
         if isinstance(item, int):
             return images[0]
@@ -152,10 +157,10 @@ class JengaDataset(TrajDataset):
             
             # 4. Load Vectors
             pos = np.array([wp['position'] for wp in waypoints], dtype=np.float32)[:final_len]
-            ori = np.array([wp['orientation'] for wp in waypoints], dtype=np.float32)[:final_len]
+            # ori = np.array([wp['orientation'] for wp in waypoints], dtype=np.float32)[:final_len]
             grip = np.array([[float(wp['gripper'])] for wp in waypoints], dtype=np.float32)[:final_len]
             
-            traj_vec = np.concatenate([pos, ori, grip], axis=-1)
+            traj_vec = np.concatenate([pos, grip], axis=-1)
             
             # Store metadata instead of loading images
             self.episodes_data.append({

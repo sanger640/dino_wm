@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - env: point_maze
+  - env: jenga
   - encoder: dino 
   - action_encoder: proprio
   - proprio_encoder: proprio
@@ -32,13 +32,13 @@ hydra:
 training:
   seed: 0
   epochs: 100
-  batch_size: 32 # should >= nodes * tasks_per_node
+  batch_size: 4 # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 6
   encoder_lr: 1e-6
   decoder_lr: 3e-4
-  predictor_lr: 5e-4
+  predictor_lr: 5e-5
   action_encoder_lr: 5e-4
 
 img_size: 224 # should be a multiple of 224
@@ -52,8 +52,10 @@ action_emb_dim: 10
 num_action_repeat: 1
 
 # proprio encoder
-proprio_emb_dim: 10 
+proprio_emb_dim: 10
 num_proprio_repeat: 1
+
+num_views: 2
 
 num_hist: 3
 num_pred: 1 # only supports 1
@@ -61,13 +63,15 @@ has_predictor: True # set this to False for only training a decoder
 has_decoder: True # set this to False for only training a predictor
 
 model:
-  _target_: models.visual_world_model.VWorldModel
+  _target_: models.dual_visual_world_model.VWorldModel
   image_size: ${img_size}
   num_hist: ${num_hist}
   num_pred: ${num_pred}
   train_encoder: False
   train_predictor: True
-  train_decoder: True
+  train_decoder: False
+  decoder_front: ${decoder}
+  decoder_wrist: ${decoder} 
 
 debug: False 
 

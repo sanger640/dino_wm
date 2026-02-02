@@ -68,6 +68,20 @@ def sample_tensors(tensors, n, indices=None):
             tensors[i] = tensor[indices]
     return tensors
 
+# Modified for device safety
+# def sample_tensors(tensors, n, indices=None):
+#     if indices is None:
+#         # Get the first non-None tensor to determine batch size and device
+#         first_tensor = next(t for t in tensors if t is not None)
+#         b = first_tensor.shape[0]
+#         device = first_tensor.device
+#         indices = torch.randperm(b, device=device)[:n] # Create on same device
+    
+#     for i, tensor in enumerate(tensors):
+#         if tensor is not None:
+#             tensors[i] = tensor[indices]
+#     return tensors
+
 
 def cfg_to_dict(cfg):
     cfg_dict = OmegaConf.to_container(cfg)

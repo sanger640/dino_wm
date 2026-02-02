@@ -1,0 +1,41 @@
+name: dino_wm_new
+channels:
+  - conda-forge
+  - pytorch  # Added for better torch compatibility
+  - nvidia   # Added for CUDA support
+dependencies:
+  - python=3.10                      # UPGRADED from 3.9 to fix DINOv2 crash
+  - pip=24.0
+  - numpy=1.26.4
+  - pillow=10.3.0
+  - openssl=3.3.0
+  - setuptools=70.0.0
+  - wheel=0.43.0
+  - ffmpeg=4.3.2
+  - ncurses=6.5
+  - readline=8.2
+  - tzdata=2024a
+  - zlib=1.2.13
+  # Core dependencies for image processing
+  - freetype=2.12.1
+  - libpng=1.6.43
+  - libtiff=4.6.0
+  - libjpeg-turbo=3.0.0
+  - pip:
+      - torch==2.3.0                 # Standardizing version
+      - torchvision==0.18.0
+      - accelerate==0.30.1           # Updated for better multi-GPU support
+      - einops==0.8.0                # Updated
+      - hydra-core==1.3.2            # Updated stable version
+      - omegaconf==2.3.0
+      - wandb==0.17.0                # Updated
+      - psutil==5.9.8
+      - tqdm==4.66.4
+      - scipy==1.13.1
+      - matplotlib==3.8.4            # Updated for Python 3.10
+      - scikit-image==0.23.2         # Updated
+      - h5py==3.11.0
+      - moviepy==1.0.3
+      - imageio==2.34.1
+      - imageio-ffmpeg==0.4.9
+      - requests==2.32.3
