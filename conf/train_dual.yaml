@@ -71,7 +71,9 @@ model:
   train_predictor: True
   train_decoder: False
   decoder_front: ${decoder}
-  decoder_wrist: ${decoder} 
+  decoder_wrist: ${decoder}
+  # decoder_front: None
+  # decoder_wrist: None
 
 debug: False 
 

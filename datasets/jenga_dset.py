@@ -7,6 +7,8 @@ from einops import rearrange
 from typing import Callable, Optional, List
 import os
 import time
+# import lmdb
+import io
 
 from .traj_dset import TrajDataset, get_train_val_sliced
 
@@ -88,6 +90,64 @@ class LazyVideo:
             return images[0]
             
         return images
+
+
+class LMDBVideo:
+    def __init__(self, ep_id, env, timestamps, cam_prefixes, freq_ratio, transform=None):
+        self.ep_id = ep_id
+        self.env = env # The LMDB environment object
+        self.timestamps = timestamps
+        self.cam_prefixes = cam_prefixes
+        self.freq_ratio = freq_ratio
+        self.transform = transform
+        self.shape = (len(timestamps) // freq_ratio, len(cam_prefixes), 3, 224, 224)
+
+    def __len__(self):
+        return self.shape[0]
+
+    def __getitem__(self, item):
+        if isinstance(item, slice):
+            indices = range(*item.indices(len(self)))
+        elif isinstance(item, int):
+            indices = [item]
+        else:
+            raise TypeError("Indices must be integers or slices")
+
+        loaded_imgs = []
+        # Use a single transaction for the whole slice to improve speed
+        with self.env.begin(write=False) as txn:
+            for action_idx in indices:
+                img_idx = action_idx * self.freq_ratio
+                t_imgs = []
+                
+                if img_idx < len(self.timestamps):
+                    ts = self.timestamps[img_idx]
+                    for prefix in self.cam_prefixes:
+                        # Construct key exactly as stored in create_lmdb.py
+                        key = f"{self.ep_id}_{prefix}_{ts}".encode('ascii')
+                        img_data = txn.get(key)
+                        
+                        if img_data:
+                            img = Image.open(io.BytesIO(img_data)).convert('RGB')
+                            t_imgs.append(np.array(img))
+                        else:
+                            t_imgs.append(np.zeros((224, 224, 3), dtype=np.uint8))
+                else:
+                    t_imgs = [np.zeros((224, 224, 3), dtype=np.uint8) for _ in self.cam_prefixes]
+                
+                loaded_imgs.append(np.stack(t_imgs))
+
+        # Tensor conversion and normalization
+        images = torch.from_numpy(np.stack(loaded_imgs)).float()
+        images = rearrange(images, "t v h w c -> t v c h w") / 255.0
+
+        if self.transform:
+            t, v, c, h, w = images.shape
+            images = self.transform(rearrange(images, "t v c h w -> (t v) c h w"))
+            images = rearrange(images, "(t v) c h w -> t v c h w", t=t, v=v)
+
+        return images[0] if isinstance(item, int) else images
+
 
 # --- Updated Dataset Class ---
 class JengaDataset(TrajDataset):
@@ -189,8 +249,16 @@ class JengaDataset(TrajDataset):
         self.action_dim = 4
         self.proprio_dim = 4
         # IMPORTANT: TrajSlicerDataset checks for this
-        self.state_dim = 4 
+        self.state_dim = 4
 
+        # self.lmdb_path = lmdb_path
+        # self.env = None # Open lazily to handle multiprocessing correctly
+
+    # def _init_db(self):
+    #     # LMDB environments cannot be shared across processes easily 
+    #     # unless opened with specific flags. Initializing in __getitem__ is safest.
+    #     if self.env is None:
+    #         self.env = lmdb.open(self.lmdb_path, readonly=True, lock=False, readahead=False, meminit=False)
     def get_seq_length(self, idx):
         return self.seq_lengths[idx]
 
@@ -199,6 +267,8 @@ class JengaDataset(TrajDataset):
         Returns full episode data, but images are wrapped in LazyVideo.
         TrajSlicerDataset calls this, then slices the result.
         """
+
+        # self._init_db() # Ensure DB is open in the current worker process
         ep_data = self.episodes_data[idx]
         
         # Prepare vectors
@@ -218,6 +288,15 @@ class JengaDataset(TrajDataset):
             freq_ratio=self.freq_ratio,
             transform=self.transform
         )
+
+        # visual_loader = LMDBVideo(
+        #     ep_id=ep_data["ep_id"], # Need to store ep_id in episodes_data
+        #     env=self.env,
+        #     timestamps=ep_data["timestamps"],
+        #     cam_prefixes=self.cam_prefixes,
+        #     freq_ratio=self.freq_ratio,
+        #     transform=self.transform
+        # )
 
         obs = {"visual": visual_loader, "proprio": proprio}
         

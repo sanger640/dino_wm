@@ -755,6 +755,9 @@ class Trainer:
                     self.cfg.frameskip
                 ]
             act = act[start : start + horizon * self.cfg.frameskip]
+
+            num_full_chunks = act.shape[0] // self.cfg.frameskip
+            act = act[:num_full_chunks * self.cfg.frameskip]
             act = rearrange(act, "(h f) d -> h (f d)", f=self.cfg.frameskip)
 
             obs_g = {}
