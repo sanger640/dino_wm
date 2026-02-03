@@ -35,13 +35,15 @@ training:
   batch_size: 4 # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
   reconstruct_every_x_batch: 500
-  num_reconstruct_samples: 6
+  num_reconstruct_samples: 2
   encoder_lr: 1e-6
   decoder_lr: 3e-4
   predictor_lr: 5e-5
   action_encoder_lr: 5e-4
 
-img_size: 224 # should be a multiple of 224
+# img_size: 224 # should be a multiple of 224
+img_size: 112 # should be a multiple of 224
+
 frameskip: 5
 concat_dim: 1
 
@@ -69,7 +71,7 @@ model:
   num_pred: ${num_pred}
   train_encoder: False
   train_predictor: True
-  train_decoder: False
+  train_decoder: True
   decoder_front: ${decoder}
   decoder_wrist: ${decoder}
   # decoder_front: None

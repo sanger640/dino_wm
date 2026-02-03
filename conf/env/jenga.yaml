@@ -21,4 +21,4 @@ dataset:
     img_size: ${img_size}
 
 decoder_path: null
-num_workers: 4  
+num_workers: 8  
