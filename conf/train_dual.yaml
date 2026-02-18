@@ -13,8 +13,9 @@ ckpt_base_path: ./ # put absolute path here
 
 hydra:
   run:
-    dir: ${ckpt_base_path}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
-  # sweep:
+    # dir: ${ckpt_base_path}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: ${ckpt_base_path}/outputs/2026-02-09/19-18-51
+      # sweep:
   #   dir: ${ckpt_base_path}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
   #   subdir: ${hydra.job.num}
   # launcher:
@@ -33,7 +34,7 @@ training:
   seed: 0
   epochs: 100
   batch_size: 4 # should >= nodes * tasks_per_node
-  save_every_x_epoch: 1
+  save_every_x_epoch: 2
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 2
   encoder_lr: 1e-6
@@ -41,8 +42,8 @@ training:
   predictor_lr: 5e-5
   action_encoder_lr: 5e-4
 
-# img_size: 224 # should be a multiple of 224
-img_size: 112 # should be a multiple of 224
+img_size: 224 # should be a multiple of 224
+# img_size: 112 # should be a multiple of 224
 
 frameskip: 5
 concat_dim: 1
