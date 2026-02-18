@@ -1,6 +1,7 @@
 import os
 import zmq
 import torch
+import torch.nn.functional as F
 import numpy as np
 import hydra
 import time
@@ -87,8 +88,6 @@ def load_model(model_ckpt, train_cfg, device):
     
     if is_dual:
         print(f"--> Detected Dual-View Model: {target_class}")
-        # In train_dual.py, these keys are stored as 'decoder_front'/'decoder_wrist'
-        # but configured using the 'decoder' config section.
         instantiate_kwargs["decoder_front"] = get_component("decoder_front", "decoder", emb_dim=emb_dim)
         instantiate_kwargs["decoder_wrist"] = get_component("decoder_wrist", "decoder", emb_dim=emb_dim)
     else:
@@ -132,7 +131,11 @@ def main(cfg: OmegaConf):
 
     # Load Model using the config passed by @hydra.main
     model = load_model(ckpt_path, cfg, device)
-    print("✅ Model Loaded. Starting ZMQ Server...")
+    
+    # Get the expected image size from config (default 224 if missing)
+    TARGET_IMG_SIZE = getattr(cfg, "img_size", 224)
+    print(f"✅ Model Loaded (Expected Input Size: {TARGET_IMG_SIZE}x{TARGET_IMG_SIZE}).")
+    print("Starting ZMQ Server...")
 
     # Setup ZMQ
     context = zmq.Context()
@@ -147,10 +150,6 @@ def main(cfg: OmegaConf):
             start_time = time.time()
 
             # --- Preprocessing ---
-            # Inputs: 
-            # visual: (B, T, V, C, H, W) [uint8 or float]
-            # proprio: (B, T, D)
-            # actions: (B, T, D)
             
             def to_tensor(arr):
                 t = torch.from_numpy(arr).float().to(device)
@@ -164,10 +163,38 @@ def main(cfg: OmegaConf):
 
             # Ensure Batch Dims
             if visual_t.ndim == 4: visual_t = visual_t.unsqueeze(0)
-            if visual_t.ndim == 5 and visual_t.shape[2] != 3: # (B, T, V, C, H, W) check
+            if visual_t.ndim == 5 and visual_t.shape[2] != 3: 
                  pass # Assume correct if 5D or 6D. 
             if proprio_t.ndim == 2: proprio_t = proprio_t.unsqueeze(0)
             if actions_t.ndim == 2: actions_t = actions_t.unsqueeze(0)
+
+            # --- RESIZE INPUTS TO MATCH MODEL TRAINING SIZE ---
+            # This fixes the "Input image width X is not a multiple of patch width: 14" error
+            if visual_t.shape[-1] != TARGET_IMG_SIZE or visual_t.shape[-2] != TARGET_IMG_SIZE:
+                # 1. Flatten dimensions for interpolation: (B, T, V, C, H, W) -> (N, C, H, W)
+                orig_shape = visual_t.shape
+                
+                if visual_t.ndim == 6: # Dual view: (B, T, V, C, H, W)
+                    b, t, v, c, h, w = orig_shape
+                    visual_t = visual_t.view(b * t * v, c, h, w)
+                    
+                    # Resize
+                    visual_t = F.interpolate(visual_t, size=(TARGET_IMG_SIZE, TARGET_IMG_SIZE), mode='bilinear', align_corners=False)
+                    
+                    # Reshape back
+                    visual_t = visual_t.view(b, t, v, c, TARGET_IMG_SIZE, TARGET_IMG_SIZE)
+                    
+                elif visual_t.ndim == 5: # Single view: (B, T, C, H, W)
+                    b, t, c, h, w = orig_shape
+                    visual_t = visual_t.view(b * t, c, h, w)
+                    
+                    # Resize
+                    visual_t = F.interpolate(visual_t, size=(TARGET_IMG_SIZE, TARGET_IMG_SIZE), mode='bilinear', align_corners=False)
+                    
+                    # Reshape back
+                    visual_t = visual_t.view(b, t, c, TARGET_IMG_SIZE, TARGET_IMG_SIZE)
+
+            # --------------------------------------------------
 
             obs_0 = {"visual": visual_t, "proprio": proprio_t}
 
@@ -189,6 +216,7 @@ def main(cfg: OmegaConf):
                     
                     # Slice to return only the FUTURE predictions (remove history context)
                     n_hist = visual_t.shape[1]
+                    
                     if full_visual_pred.shape[1] > n_hist:
                         future_visual_pred = full_visual_pred[:, n_hist:]
                     else:
