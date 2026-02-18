@@ -11,9 +11,18 @@ from omegaconf import OmegaConf
 
 # --- CONFIG ---
 # Path to your trained checkpoint
-CHECKPOINT_PATH = "checkpoints/model_latest.pth" 
+CHECKPOINT_PATH = "checkpoints/2026-02-09/model_latest.pth" 
 PORT = 5556
-# --------------
+
+# --- NORMALIZATION STATS (From Dataset) ---
+# Must match training statistics exactly
+ACTION_MEAN = torch.tensor([0.4472, 0.0025, 0.4921, 0.0202], device='cuda')
+ACTION_STD  = torch.tensor([0.0297, 0.0085, 0.0195, 0.1406], device='cuda')
+
+# Assuming Proprioception uses same stats (standard for this codebase)
+PROPRIO_MEAN = ACTION_MEAN
+PROPRIO_STD  = ACTION_STD
+# ------------------------------------------
 
 # Keys found in the checkpoint dictionary
 ALL_MODEL_KEYS = [
@@ -26,75 +35,113 @@ ALL_MODEL_KEYS = [
     "action_encoder",
 ]
 
-def load_ckpt(snapshot_path, device):
-    """Load model weights from checkpoint file."""
-    print(f"Loading weights from: {snapshot_path}")
+def load_ckpt_payload(snapshot_path, device):
+    """Load model payload from checkpoint file (does not instantiate objects)."""
+    print(f"Loading payload from: {snapshot_path}")
     with snapshot_path.open("rb") as f:
-        # weights_only=False is required for PyTorch 2.6+ with this codebase
         payload = torch.load(f, map_location=device, weights_only=False)
     
     result = {}
     for k, v in payload.items():
         if k in ALL_MODEL_KEYS:
-            result[k] = v.to(device)
-    result["epoch"] = payload["epoch"]
+            result[k] = v
+    result["epoch"] = payload.get("epoch", 0)
     return result
 
 def load_model(model_ckpt, train_cfg, device):
     """Reconstruct and load the VWorldModel (Dual or Single)."""
     model_ckpt = Path(model_ckpt)
     
-    # 1. Load Checkpoint Data
+    # 1. Load Checkpoint Data (Weights/Payload only)
+    ckpt_data = {}
     if model_ckpt.exists():
-        result = load_ckpt(model_ckpt, device)
+        ckpt_data = load_ckpt_payload(model_ckpt, device)
     else:
         print(f"Warning: Checkpoint not found at {model_ckpt}. Initializing fresh model.")
-        result = {}
 
-    # 2. Helper to load components
+    # 2. Helper to load components: Instantiate -> Load State
     def get_component(key, cfg_section=None, **kwargs):
-        # Try loading from checkpoint first
-        if key in result:
-            return result[key]
-        # Fallback: Instantiate from config
+        component = None
+        
+        # A. Instantiate from Config (Crucial: Always create fresh object)
         if cfg_section and hasattr(train_cfg, cfg_section):
             print(f"Instantiating {key} from config ({cfg_section})...")
-            return hydra.utils.instantiate(getattr(train_cfg, cfg_section), **kwargs)
-        return None
+            component = hydra.utils.instantiate(getattr(train_cfg, cfg_section), **kwargs)
+            component.to(device)
+        
+        # B. Load Weights if available in checkpoint
+        if key in ckpt_data and component is not None:
+            print(f"Loading weights for {key}...")
+            weights = ckpt_data[key]
+            try:
+                if isinstance(weights, dict):
+                    component.load_state_dict(weights)
+                elif isinstance(weights, torch.nn.Module):
+                    component.load_state_dict(weights.state_dict())
+            except Exception as e:
+                print(f"Warning: Failed to load weights for {key}: {e}")
+                
+        elif key in ckpt_data and component is None:
+             print(f"Warning: {key} found in checkpoint but not in config. Ignoring.")
+             
+        return component
 
     # 3. Prepare Constructor Arguments
     instantiate_kwargs = {}
 
-    # Load Encoder first (needed for emb_dim)
     instantiate_kwargs["encoder"] = get_component("encoder", "encoder")
-    
-    # Get embedding dimension for decoder instantiation
-    emb_dim = getattr(instantiate_kwargs["encoder"], "emb_dim", 384)
+    if hasattr(instantiate_kwargs["encoder"], "emb_dim"):
+        encoder_emb_dim = instantiate_kwargs["encoder"].emb_dim
+    else:
+        encoder_emb_dim = 384
 
-    # Load other standard components
     instantiate_kwargs["proprio_encoder"] = get_component(
         "proprio_encoder", "proprio_encoder", 
-        in_chans=train_cfg.proprio_emb_dim, emb_dim=train_cfg.proprio_emb_dim
+        in_chans=4, emb_dim=train_cfg.proprio_emb_dim
     )
+    
     instantiate_kwargs["action_encoder"] = get_component(
         "action_encoder", "action_encoder", 
-        in_chans=train_cfg.action_emb_dim, emb_dim=train_cfg.action_emb_dim
+        in_chans=train_cfg.action_emb_dim, 
+        emb_dim=train_cfg.action_emb_dim
     )
-    instantiate_kwargs["predictor"] = get_component("predictor", "predictor")
 
-    # 4. Handle Single vs Dual View Logic
+    # --- CALCULATE PREDICTOR ARGS ---
     target_class = train_cfg.model._target_
     is_dual = "dual" in target_class or "Dual" in target_class
-    
-    if is_dual:
-        print(f"--> Detected Dual-View Model: {target_class}")
-        instantiate_kwargs["decoder_front"] = get_component("decoder_front", "decoder", emb_dim=emb_dim)
-        instantiate_kwargs["decoder_wrist"] = get_component("decoder_wrist", "decoder", emb_dim=emb_dim)
-    else:
-        print(f"--> Detected Single-View Model: {target_class}")
-        instantiate_kwargs["decoder"] = get_component("decoder", "decoder", emb_dim=emb_dim)
+    num_views = 2 if is_dual else 1
+    img_size = getattr(train_cfg, "img_size", 224)
+    concat_dim = getattr(train_cfg, "concat_dim", 0)
+    num_hist = train_cfg.num_hist
+    patch_size = getattr(instantiate_kwargs["encoder"], "patch_size", 14)
 
-    # 5. Extract Dimensions & Params from Config
+    patches_per_view = (img_size // patch_size) ** 2
+    total_visual_patches = num_views * patches_per_view
+    extra_tokens = 2 if concat_dim == 0 else 0
+    predictor_num_patches = total_visual_patches + extra_tokens
+
+    if concat_dim == 1:
+        proprio_dim = getattr(train_cfg, "proprio_emb_dim", 0) * getattr(train_cfg, "num_proprio_repeat", 1)
+        action_dim = getattr(train_cfg, "action_emb_dim", 0) * getattr(train_cfg, "num_action_repeat", 1)
+        predictor_dim = encoder_emb_dim + action_dim + proprio_dim
+    else:
+        predictor_dim = encoder_emb_dim
+
+    print(f"Initializing Predictor with: dim={predictor_dim}, num_patches={predictor_num_patches}, num_frames={num_hist}")
+
+    instantiate_kwargs["predictor"] = get_component(
+        "predictor", "predictor",
+        dim=predictor_dim,
+        num_patches=predictor_num_patches,
+        num_frames=num_hist
+    )
+
+    if is_dual:
+        instantiate_kwargs["decoder_front"] = get_component("decoder_front", "decoder", emb_dim=encoder_emb_dim)
+        instantiate_kwargs["decoder_wrist"] = get_component("decoder_wrist", "decoder", emb_dim=encoder_emb_dim)
+    else:
+        instantiate_kwargs["decoder"] = get_component("decoder", "decoder", emb_dim=encoder_emb_dim)
+
     instantiate_kwargs["proprio_dim"] = getattr(train_cfg, "proprio_emb_dim", 0)
     instantiate_kwargs["action_dim"] = getattr(train_cfg, "action_emb_dim", 0)
     instantiate_kwargs["concat_dim"] = getattr(train_cfg, "concat_dim", 0)
@@ -104,40 +151,34 @@ def load_model(model_ckpt, train_cfg, device):
     instantiate_kwargs["num_hist"] = train_cfg.num_hist
     instantiate_kwargs["num_pred"] = train_cfg.num_pred
 
-    # 6. Instantiate the Full Model
-    print("Instantiating VWorldModel...")
-    model = hydra.utils.instantiate(
-        train_cfg.model,
-        **instantiate_kwargs
-    )
-    
+    model = hydra.utils.instantiate(train_cfg.model, **instantiate_kwargs)
     model.to(device)
     model.eval()
     return model
 
-@hydra.main(version_base=None, config_path="conf", config_name="train_dual")
+@hydra.main(version_base=None, config_path="outputs/2026-02-09/19-18-51/.hydra/", config_name="config")
 def main(cfg: OmegaConf):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    # Determine Checkpoint Path (Priority: Constant -> Hydra Config -> Default)
     ckpt_path = Path(CHECKPOINT_PATH)
     if not ckpt_path.exists():
-        # Fallback to location defined in hydra config if constant is invalid
         base = Path(cfg.ckpt_base_path)
-        ckpt_path = base / "outputs" / "model_latest.pth"
+        ckpt_path = base / "outputs" / "2026-02-09/19-18-51/checkpoints/model_latest.pth"
     
     print(f"Target Checkpoint: {ckpt_path}")
 
-    # Load Model using the config passed by @hydra.main
     model = load_model(ckpt_path, cfg, device)
     
-    # Get the expected image size from config (default 224 if missing)
     TARGET_IMG_SIZE = getattr(cfg, "img_size", 224)
-    print(f"✅ Model Loaded (Expected Input Size: {TARGET_IMG_SIZE}x{TARGET_IMG_SIZE}).")
+    EXPECTED_ACTION_DIM = getattr(cfg, "action_emb_dim", 20)
+
+    print(f"✅ Model Loaded.")
+    print(f"   Image Size: {TARGET_IMG_SIZE}x{TARGET_IMG_SIZE}")
+    print(f"   Action Dim: {EXPECTED_ACTION_DIM}")
+    print(f"   Norm Stats Applied: Mean={ACTION_MEAN.cpu().numpy()}, Std={ACTION_STD.cpu().numpy()}")
     print("Starting ZMQ Server...")
 
-    # Setup ZMQ
     context = zmq.Context()
     socket = context.socket(zmq.REP)
     socket.bind(f"tcp://*:{PORT}")
@@ -145,16 +186,15 @@ def main(cfg: OmegaConf):
 
     while True:
         try:
-            # Receive Input
             message = socket.recv_pyobj()
             start_time = time.time()
 
             # --- Preprocessing ---
-            
             def to_tensor(arr):
                 t = torch.from_numpy(arr).float().to(device)
                 if arr.dtype == np.uint8:
-                    t = t / 255.0
+                    # Normalize Images to [-1, 1]
+                    t = (t / 127.5) - 1.0 
                 return t
 
             visual_t = to_tensor(message['visual'])
@@ -163,73 +203,62 @@ def main(cfg: OmegaConf):
 
             # Ensure Batch Dims
             if visual_t.ndim == 4: visual_t = visual_t.unsqueeze(0)
-            if visual_t.ndim == 5 and visual_t.shape[2] != 3: 
-                 pass # Assume correct if 5D or 6D. 
             if proprio_t.ndim == 2: proprio_t = proprio_t.unsqueeze(0)
             if actions_t.ndim == 2: actions_t = actions_t.unsqueeze(0)
 
-            # --- RESIZE INPUTS TO MATCH MODEL TRAINING SIZE ---
-            # This fixes the "Input image width X is not a multiple of patch width: 14" error
+            # --- 1. Normalize Actions & Proprioception ---
+            # Input: (B, T, 4) -> Output: (B, T, 4) Normalized
+            # Note: We normalize BEFORE padding because the mean/std only apply to the active dimensions (4)
+            proprio_t = (proprio_t - PROPRIO_MEAN) / PROPRIO_STD
+            actions_t = (actions_t - ACTION_MEAN) / ACTION_STD
+
+            # --- 2. Resize Images ---
             if visual_t.shape[-1] != TARGET_IMG_SIZE or visual_t.shape[-2] != TARGET_IMG_SIZE:
-                # 1. Flatten dimensions for interpolation: (B, T, V, C, H, W) -> (N, C, H, W)
                 orig_shape = visual_t.shape
-                
                 if visual_t.ndim == 6: # Dual view: (B, T, V, C, H, W)
                     b, t, v, c, h, w = orig_shape
                     visual_t = visual_t.view(b * t * v, c, h, w)
-                    
-                    # Resize
                     visual_t = F.interpolate(visual_t, size=(TARGET_IMG_SIZE, TARGET_IMG_SIZE), mode='bilinear', align_corners=False)
-                    
-                    # Reshape back
                     visual_t = visual_t.view(b, t, v, c, TARGET_IMG_SIZE, TARGET_IMG_SIZE)
-                    
                 elif visual_t.ndim == 5: # Single view: (B, T, C, H, W)
                     b, t, c, h, w = orig_shape
                     visual_t = visual_t.view(b * t, c, h, w)
-                    
-                    # Resize
                     visual_t = F.interpolate(visual_t, size=(TARGET_IMG_SIZE, TARGET_IMG_SIZE), mode='bilinear', align_corners=False)
-                    
-                    # Reshape back
                     visual_t = visual_t.view(b, t, c, TARGET_IMG_SIZE, TARGET_IMG_SIZE)
 
-            # --------------------------------------------------
-
+            # --- 3. Pad Actions (4 -> 20) ---
+            # curr_act_dim = actions_t.shape[-1]
+            # if curr_act_dim < EXPECTED_ACTION_DIM:
+            #     diff = EXPECTED_ACTION_DIM - curr_act_dim
+            #     actions_t = F.pad(actions_t, (0, diff), "constant", 0)
+            
+            # --- 4. Inference ---
             obs_0 = {"visual": visual_t, "proprio": proprio_t}
 
-            # --- Inference (Rollout) ---
             with torch.no_grad():
-                # rollout returns embeddings (z_obses) and combined z
                 z_obses, _ = model.rollout(obs_0, actions_t)
                 
-                # --- Decoding ---
-                # Check for decoders
                 has_decoder = (hasattr(model, "decoder") and model.decoder is not None) or \
                               (hasattr(model, "decoder_front") and model.decoder_front is not None)
 
                 if has_decoder:
                     decoded_obs, _ = model.decode_obs(z_obses)
                     
-                    # 'visual' in decoded_obs is usually (B, T, C, H, W) or (B, T, V, C, H, W)
                     full_visual_pred = decoded_obs['visual']
-                    
-                    # Slice to return only the FUTURE predictions (remove history context)
                     n_hist = visual_t.shape[1]
                     
                     if full_visual_pred.shape[1] > n_hist:
                         future_visual_pred = full_visual_pred[:, n_hist:]
                     else:
-                        future_visual_pred = full_visual_pred # Fallback if no future gen
+                        future_visual_pred = full_visual_pred 
 
-                    # Convert to Numpy uint8
+                    # Denormalize Images: [-1, 1] -> [0, 255]
                     future_visual_np = future_visual_pred.cpu().numpy()
+                    future_visual_np = (future_visual_np + 1.0) / 2.0
                     result_data = np.clip(future_visual_np * 255, 0, 255).astype(np.uint8)
                 else:
-                    # Return embeddings if no decoder
                     result_data = z_obses['visual'].cpu().numpy()
 
-            # Send Reply
             socket.send_pyobj({
                 'states': result_data,
                 'inference_time': time.time() - start_time
