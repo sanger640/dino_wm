@@ -102,7 +102,7 @@ def load_model(model_ckpt, train_cfg, device):
     
     instantiate_kwargs["action_encoder"] = get_component(
         "action_encoder", "action_encoder", 
-        in_chans=train_cfg.action_emb_dim, 
+        in_chans=4, 
         emb_dim=train_cfg.action_emb_dim
     )
 
@@ -205,12 +205,13 @@ def main(cfg: OmegaConf):
             if visual_t.ndim == 4: visual_t = visual_t.unsqueeze(0)
             if proprio_t.ndim == 2: proprio_t = proprio_t.unsqueeze(0)
             if actions_t.ndim == 2: actions_t = actions_t.unsqueeze(0)
-
+            print("ACTIONNNNNSS")
+            print(actions_t)
             # --- 1. Normalize Actions & Proprioception ---
             # Input: (B, T, 4) -> Output: (B, T, 4) Normalized
-            # Note: We normalize BEFORE padding because the mean/std only apply to the active dimensions (4)
-            proprio_t = (proprio_t - PROPRIO_MEAN) / PROPRIO_STD
-            actions_t = (actions_t - ACTION_MEAN) / ACTION_STD
+            # # Note: We normalize BEFORE padding because the mean/std only apply to the active dimensions (4)
+            # proprio_t = (proprio_t - PROPRIO_MEAN) / PROPRIO_STD
+            # actions_t = (actions_t - ACTION_MEAN) / ACTION_STD
 
             # --- 2. Resize Images ---
             if visual_t.shape[-1] != TARGET_IMG_SIZE or visual_t.shape[-2] != TARGET_IMG_SIZE:
