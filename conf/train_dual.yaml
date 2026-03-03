@@ -45,7 +45,7 @@ training:
 img_size: 224 # should be a multiple of 224
 # img_size: 112 # should be a multiple of 224
 
-frameskip: 5
+frameskip: 1
 concat_dim: 1
 
 normalize_action: True
@@ -60,7 +60,7 @@ num_proprio_repeat: 1
 
 num_views: 2
 
-num_hist: 3
+num_hist: 2
 num_pred: 1 # only supports 1
 has_predictor: True # set this to False for only training a decoder
 has_decoder: True # set this to False for only training a predictor

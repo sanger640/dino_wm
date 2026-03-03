@@ -104,9 +104,9 @@ class VWorldModel(nn.Module):
         output:    z (tensor): (b, num_frames, total_patches, emb_dim)
         """
         z_dct = self.encode_obs(obs)
-        print("hmmm")
+        # print("hmmm")
         act_emb = self.encode_act(act)
-        print("coolio")
+        # print("coolio")
         # Note: z_dct['visual'] now contains patches from ALL views concatenated
         
         if self.concat_dim == 0:
@@ -359,16 +359,22 @@ class VWorldModel(nn.Module):
                 z: (b, t+n+1, num_patches, emb_dim)
         """
         num_obs_init = obs_0['visual'].shape[1]
-        print("nums obs init")
-        print(num_obs_init)
+        # print("nums obs init")
+        # print(num_obs_init)
+        # print("num hist")
+        # print(self.num_hist)
         act_0 = act[:, :num_obs_init]
+        # print("Act_0")
+        # print(act_0)
+        # print("Obs_0")
+        # print(obs_0)
         
         action = act[:, num_obs_init:] 
-        print("act0 act")
+        # print("act0 act")
         # print(act_0)
         # print(action)
         z = self.encode(obs_0, act_0)
-        print("ZZZZ")
+        # print("ZZZZ")
         t = 0
         inc = 1
         while t < action.shape[1]:

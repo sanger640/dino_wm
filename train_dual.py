@@ -229,6 +229,8 @@ class Trainer:
             in_chans=self.datasets["train"].proprio_dim,
             emb_dim=self.cfg.proprio_emb_dim,
         )
+        # print("hey bbb look here for prop")
+        # print(self.datasets["train"].proprio_dim)
         proprio_emb_dim = self.proprio_encoder.emb_dim
         print(f"Proprio encoder type: {type(self.proprio_encoder)}")
         self.proprio_encoder = self.accelerator.prepare(self.proprio_encoder)
@@ -238,6 +240,8 @@ class Trainer:
             in_chans=self.datasets["train"].action_dim,
             emb_dim=self.cfg.action_emb_dim,
         )
+        # print("hey bbbb look here for act")
+        # print(self.datasets["train"].action_dim)
         action_emb_dim = self.action_encoder.emb_dim
         print(f"Action encoder type: {type(self.action_encoder)}")
 

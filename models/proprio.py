@@ -48,7 +48,8 @@ class ProprioceptiveEmbedding(nn.Module):
     ):
         super().__init__()
         print(f'using 3d prop position {use_3d_pos=}')
-        print(in_chans)
+        # print("in channnnnss")
+        # print(in_chans)
         # Map input to predictor dimension
         self.num_frames = num_frames
         self.tubelet_size = tubelet_size
@@ -63,16 +64,16 @@ class ProprioceptiveEmbedding(nn.Module):
 
     def forward(self, x):
         # x: proprioceptive vectors of shape [B T D]
-        print("hey there")
-        print(x.shape)
+        # print("hey there")
+        # print(x.shape)
         x = x.permute(0, 2, 1)
-        print(x.shape)
-        print("params")
-        print(self.num_frames)
-        print(self.tubelet_size)
-        print(self.in_chans)
-        print(self.emb_dim)
+        # print(x.shape)
+        # print("params")
+        # print(self.num_frames)
+        # print(self.tubelet_size)
+        # print(self.in_chans)
+        # print(self.emb_dim)
         x = self.patch_embed(x)
-        print("yay")
+        # print("yay")
         x = x.permute(0, 2, 1)
         return x
