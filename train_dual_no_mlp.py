@@ -122,22 +122,16 @@ class Trainer:
         self.train_traj_dset = traj_dsets["train"]
         self.val_traj_dset = traj_dsets["valid"]
 
-        # --- MODIFICATION: Pinned Memory + Persistent Workers ---
-        use_workers = self.cfg.env.num_workers > 0
         self.dataloaders = {
             x: torch.utils.data.DataLoader(
                 self.datasets[x],
                 batch_size=self.cfg.gpu_batch_size,
-                shuffle=False, 
+                shuffle=False, # already shuffled in TrajSlicerDataset
                 num_workers=self.cfg.env.num_workers,
                 collate_fn=None,
-                pin_memory=True, 
-                persistent_workers=use_workers, 
-                prefetch_factor=3 if use_workers else None,
             )
             for x in ["train", "valid"]
         }
-        # --------------------------------------------------------
 
         log.info(f"dataloader batch size: {self.cfg.gpu_batch_size}")
 
@@ -149,6 +143,7 @@ class Trainer:
         self.action_encoder = None
         self.proprio_encoder = None
         self.predictor = None
+        # self.decoder = None
         self.decoder_front = None
         self.decoder_wrist = None
         self.train_encoder = self.cfg.model.train_encoder
@@ -165,15 +160,14 @@ class Trainer:
         self._keys_to_save += (
             ["encoder", "encoder_optimizer"] if self.train_encoder else []
         )
-        
-        # --- MODIFICATION: Track MLP Heads in Checkpoints ---
         self._keys_to_save += (
-            ["predictor", "wrist_head", "front_head", "proprio_head", "predictor_optimizer"]
+            ["predictor", "predictor_optimizer"]
             if self.train_predictor and self.cfg.has_predictor
             else []
         )
-        # ----------------------------------------------------
-        
+        # self._keys_to_save += (
+        #     ["decoder", "decoder_optimizer"] if self.train_decoder else []
+        # )
         if self.train_decoder:
             self._keys_to_save += ["decoder_front", "decoder_wrist", "decoder_optimizer"]
         else:
@@ -235,6 +229,8 @@ class Trainer:
             in_chans=self.datasets["train"].proprio_dim,
             emb_dim=self.cfg.proprio_emb_dim,
         )
+        # print("hey bbb look here for prop")
+        # print(self.datasets["train"].proprio_dim)
         proprio_emb_dim = self.proprio_encoder.emb_dim
         print(f"Proprio encoder type: {type(self.proprio_encoder)}")
         self.proprio_encoder = self.accelerator.prepare(self.proprio_encoder)
@@ -244,6 +240,8 @@ class Trainer:
             in_chans=self.datasets["train"].action_dim,
             emb_dim=self.cfg.action_emb_dim,
         )
+        # print("hey bbbb look here for act")
+        # print(self.datasets["train"].action_dim)
         action_emb_dim = self.action_encoder.emb_dim
         print(f"Action encoder type: {type(self.action_encoder)}")
 
@@ -259,8 +257,11 @@ class Trainer:
         else:
             decoder_scale = 16  # from vqvae
             num_side_patches = self.cfg.img_size // decoder_scale
+            # --- MODIFICATION: Multiply by number of views ---
+            # Defaults to 2 if not in config
             num_views = 2 
             num_patches = (num_side_patches**2) * num_views
+            # -------------------------------------------------
 
         if self.cfg.concat_dim == 0:
             num_patches += 2
@@ -284,19 +285,39 @@ class Trainer:
 
         # initialize decoder
         if self.cfg.has_decoder:
+            # if self.decoder is None:
+            #     if self.cfg.env.decoder_path is not None:
+            #         decoder_path = os.path.join(
+            #             self.base_path, self.cfg.env.decoder_path
+            #         )
+            #         ckpt = torch.load(decoder_path)
+            #         if isinstance(ckpt, dict):
+            #             self.decoder = ckpt["decoder"]
+            #         else:
+            #             self.decoder = torch.load(decoder_path)
+            #         log.info(f"Loaded decoder from {decoder_path}")
+            #     else:
+            #         self.decoder = hydra.utils.instantiate(
+            #             self.cfg.decoder,
+            #             emb_dim=self.encoder.emb_dim,  # 384
+            #         )
             if self.decoder_wrist is None or self.decoder_front is None:
                 if self.cfg.env.decoder_path is not None:
                     decoder_path = os.path.join(self.base_path, self.cfg.env.decoder_path)
                     ckpt = torch.load(decoder_path, map_location=self.device)
                     
+                    # Helper to extract the model from different checkpoint formats
                     def get_decoder_weights(c):
                         return c["decoder"] if isinstance(c, dict) and "decoder" in c else c
 
+                    # Load weights into two distinct objects
                     self.decoder_wrist = get_decoder_weights(ckpt)
+                    # We deepcopy or reload to ensure they don't share memory
                     self.decoder_front = torch.serialization.copy.deepcopy(self.decoder_wrist)
                     
                     log.info(f"Loaded dual decoders from pre-trained: {decoder_path}")
                 else:
+                    # Fresh start for both
                     self.decoder_wrist = hydra.utils.instantiate(
                         self.cfg.decoder, emb_dim=self.encoder.emb_dim
                     )
@@ -304,13 +325,20 @@ class Trainer:
                         self.cfg.decoder, emb_dim=self.encoder.emb_dim
                     )
                     log.info("Initialized two fresh VQ-VAE decoders.")
-                    
+            # log.info("Initializing separate Wrist and Front decoders...")
+            # self.decoder_wrist = hydra.utils.instantiate(
+            #     self.cfg.decoder, 
+            #     emb_dim=self.encoder.emb_dim 
+            # )
+            # self.decoder_front = hydra.utils.instantiate(
+            #     self.cfg.decoder, 
+            #     emb_dim=self.encoder.emb_dim 
+            # )
             if not self.train_decoder:
                 for param in self.decoder_front.parameters():
                     param.requires_grad = False
                 for param in self.decoder_wrist.parameters():
                     param.requires_grad = False
-                    
         self.encoder, self.predictor, self.decoder_wrist, self.decoder_front = self.accelerator.prepare(
             self.encoder, self.predictor, self.decoder_wrist, self.decoder_front
         )
@@ -321,8 +349,8 @@ class Trainer:
             proprio_encoder=self.proprio_encoder,
             action_encoder=self.action_encoder,
             predictor=self.predictor,
-            decoder_front=self.decoder_front,
-            decoder_wrist=self.decoder_wrist,
+            decoder_front=self.decoder_front, # Updated
+            decoder_wrist=self.decoder_wrist, # Updated
             proprio_dim=proprio_emb_dim,
             action_dim=action_emb_dim,
             concat_dim=self.cfg.concat_dim,
@@ -330,52 +358,20 @@ class Trainer:
             num_proprio_repeat=self.cfg.num_proprio_repeat,
         )
 
-        # --- MODIFICATION: Extract, Prepare, and Reattach MLP Heads ---
-        if self.cfg.has_predictor:
-            # Check if heads were loaded from a checkpoint
-            if hasattr(self, "wrist_head"):
-                self.model.wrist_head = self.wrist_head
-                self.model.front_head = self.front_head
-                self.model.proprio_head = self.proprio_head
-            else:
-                # First time initialization: alias them so save_ckpt finds them
-                self.wrist_head = self.model.wrist_head
-                self.front_head = self.model.front_head
-                self.proprio_head = self.model.proprio_head
-
-            # Push heads to the correct device (GPU) and wrap for DDP via Accelerate
-            self.wrist_head, self.front_head, self.proprio_head = self.accelerator.prepare(
-                self.wrist_head, self.front_head, self.proprio_head
-            )
-            
-            # Reassign the wrapped heads back to the model for forward passes
-            self.model.wrist_head = self.wrist_head
-            self.model.front_head = self.front_head
-            self.model.proprio_head = self.proprio_head
-        # --------------------------------------------------------------
-
     def init_optimizers(self):
         self.encoder_optimizer = torch.optim.Adam(
             self.encoder.parameters(),
             lr=self.cfg.training.encoder_lr,
         )
         self.encoder_optimizer = self.accelerator.prepare(self.encoder_optimizer)
-        
-        # --- MODIFICATION: Feed MLP heads into Predictor Optimizer ---
         if self.cfg.has_predictor:
             self.predictor_optimizer = torch.optim.AdamW(
-                itertools.chain(
-                    self.predictor.parameters(),
-                    self.wrist_head.parameters(),
-                    self.front_head.parameters(),
-                    self.proprio_head.parameters()
-                ),
+                self.predictor.parameters(),
                 lr=self.cfg.training.predictor_lr,
             )
             self.predictor_optimizer = self.accelerator.prepare(
                 self.predictor_optimizer
             )
-        # -------------------------------------------------------------
 
             self.action_encoder_optimizer = torch.optim.AdamW(
                 itertools.chain(
@@ -387,7 +383,13 @@ class Trainer:
                 self.action_encoder_optimizer
             )
 
+        # if self.cfg.has_decoder:
+        #     self.decoder_optimizer = torch.optim.Adam(
+        #         self.decoder.parameters(), lr=self.cfg.training.decoder_lr
+        #     )
+        #     self.decoder_optimizer = self.accelerator.prepare(self.decoder_optimizer)
         if self.cfg.has_decoder:
+            # We combine both decoders' parameters into one optimizer for efficiency
             self.decoder_optimizer = torch.optim.Adam(
                 itertools.chain(
                     self.decoder_wrist.parameters(), 
@@ -396,8 +398,10 @@ class Trainer:
                 lr=self.cfg.training.decoder_lr
             )
             self.decoder_optimizer = self.accelerator.prepare(self.decoder_optimizer)
-
     def monitor_jobs(self, lock):
+        """
+        check planning eval jobs' status and update logs
+        """
         while True:
             with lock:
                 finished_jobs = [
@@ -435,10 +439,11 @@ class Trainer:
             self.logs_flash(step=self.epoch)
             if self.epoch % self.cfg.training.save_every_x_epoch == 0:
                 ckpt_path, model_name, model_epoch = self.save_ckpt()
+                # main thread only: launch planning jobs on the saved ckpt
                 if (
                     self.cfg.plan_settings.plan_cfg_path is not None
                     and ckpt_path is not None
-                ): 
+                ):  # ckpt_path is only not None for main process
                     from plan import build_plan_cfg_dicts, launch_plan_jobs
 
                     cfg_dicts = build_plan_cfg_dicts(
@@ -471,6 +476,11 @@ class Trainer:
         return logs
 
     def err_eval(self, z_out, z_tgt, state_tgt=None):
+        """
+        z_pred: (b, n_hist, n_patches, emb_dim), doesn't include action dims
+        z_tgt: (b, n_hist, n_patches, emb_dim), doesn't include action dims
+        state:  (b, n_hist, dim)
+        """
         logs = {}
         slices = {
             "full": (None, None),
@@ -490,10 +500,13 @@ class Trainer:
 
         return logs
 
+    # --- MODIFICATION: Helper to flatten views for metrics ---
     def flatten_views(self, img_tensor):
         if img_tensor.ndim == 5:
+             # (B, V, C, H, W) -> (B*V, C, H, W)
              return rearrange(img_tensor, "b v c h w -> (b v) c h w")
         return img_tensor
+    # ---------------------------------------------------------
 
     def train(self):
         for i, data in enumerate(
@@ -530,6 +543,7 @@ class Trainer:
                 key: value.mean().item() for key, value in loss_components.items()
             }
             if self.cfg.has_decoder and plot:
+                # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
                     z_obs_out, z_act_out = self.model.separate_emb(z_out)
                     z_gt = self.model.encode_obs(obs)
@@ -550,10 +564,12 @@ class Trainer:
                     for t in range(
                         self.cfg.num_hist, self.cfg.num_hist + self.cfg.num_pred
                     ):
+                        # --- MODIFICATION: Flatten Views for Metrics ---
                         pred_t = self.flatten_views(visual_out[:, t - self.cfg.num_pred])
                         gt_t = self.flatten_views(obs["visual"][:, t])
                         
                         img_pred_scores = eval_images(pred_t, gt_t)
+                        # -----------------------------------------------
                         
                         img_pred_scores = self.accelerator.gather_for_metrics(
                             img_pred_scores
@@ -566,10 +582,12 @@ class Trainer:
 
                 if visual_reconstructed is not None:
                     for t in range(obs["visual"].shape[1]):
+                        # --- MODIFICATION: Flatten Views for Metrics ---
                         recon_t = self.flatten_views(visual_reconstructed[:, t])
                         gt_t = self.flatten_views(obs["visual"][:, t])
                         
                         img_reconstruction_scores = eval_images(recon_t, gt_t)
+                        # -----------------------------------------------
 
                         img_reconstruction_scores = self.accelerator.gather_for_metrics(
                             img_reconstruction_scores
@@ -629,6 +647,7 @@ class Trainer:
             }
 
             if self.cfg.has_decoder and plot:
+                # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
                     z_obs_out, z_act_out = self.model.separate_emb(z_out)
                     z_gt = self.model.encode_obs(obs)
@@ -649,10 +668,12 @@ class Trainer:
                     for t in range(
                         self.cfg.num_hist, self.cfg.num_hist + self.cfg.num_pred
                     ):
+                        # --- MODIFICATION: Flatten Views for Metrics ---
                         pred_t = self.flatten_views(visual_out[:, t - self.cfg.num_pred])
                         gt_t = self.flatten_views(obs["visual"][:, t])
 
                         img_pred_scores = eval_images(pred_t, gt_t)
+                        # -----------------------------------------------
                         
                         img_pred_scores = self.accelerator.gather_for_metrics(
                             img_pred_scores
@@ -665,10 +686,12 @@ class Trainer:
 
                 if visual_reconstructed is not None:
                     for t in range(obs["visual"].shape[1]):
+                        # --- MODIFICATION: Flatten Views for Metrics ---
                         recon_t = self.flatten_views(visual_reconstructed[:, t])
                         gt_t = self.flatten_views(obs["visual"][:, t])
 
                         img_reconstruction_scores = eval_images(recon_t, gt_t)
+                        # -----------------------------------------------
 
                         img_reconstruction_scores = self.accelerator.gather_for_metrics(
                             img_reconstruction_scores
@@ -702,8 +725,10 @@ class Trainer:
         self.accelerator.wait_for_everyone()
         logs = {}
 
+        # rollout with both num_hist and 1 frame as context
         num_past = [(self.cfg.num_hist, ""), (1, "_1framestart")]
 
+        # sample traj
         for idx in range(num_rollout):
             valid_traj = False
             while not valid_traj:
@@ -752,7 +777,7 @@ class Trainer:
                 for k in obs.keys():
                     obs_0[k] = (
                         obs[k][:n_past].unsqueeze(0).to(self.device)
-                    ) 
+                    )  # unsqueeze for batch, (b, t, c, h, w)
 
                 z_obses, z = self.model.rollout(obs_0, actions)
                 z_obs_last = slice_trajdict_with_t(z_obses, start_idx=-1, end_idx=None)
@@ -772,12 +797,16 @@ class Trainer:
                 if self.cfg.has_decoder:
                     visuals = self.model.decode_obs(z_obses)[0]["visual"]
                     
+                    # --- MODIFICATION: Handle Multi-View for Rollout Plots ---
+                    # obs["visual"] is (T, V, C, H, W) -> LazyVideo returns 5D
                     gt_vis = obs["visual"]
                     pred_vis = visuals[0].cpu()
 
+                    # Merge Views into Width (T, C, H, W*V)
                     if gt_vis.ndim == 5:
                         gt_vis = rearrange(gt_vis, "t v c h w -> t c h (v w)")
                         pred_vis = rearrange(pred_vis, "t v c h w -> t c h (v w)")
+                    # ---------------------------------------------------------
 
                     imgs = torch.cat([gt_vis, pred_vis], dim=0)
                     self.plot_imgs(
@@ -825,7 +854,13 @@ class Trainer:
         num_samples=2,
         phase="train",
     ):
+        """
+        input:  gt_imgs, reconstructed_gt_imgs: (b, num_hist + num_pred, 3, img_size, img_size)
+                pred_imgs: (b, num_hist, 3, img_size, img_size)
+        output:   imgs: (b, num_frames, 3, img_size, img_size)
+        """
         num_frames = gt_imgs.shape[1]
+        # sample num_samples images
         gt_imgs, pred_imgs, reconstructed_gt_imgs = sample_tensors(
             [gt_imgs, pred_imgs, reconstructed_gt_imgs],
             num_samples,
@@ -834,6 +869,7 @@ class Trainer:
 
         num_samples = min(num_samples, gt_imgs.shape[0])
 
+        # fill in blank images for frameskips
         if pred_imgs is not None:
             pred_imgs = torch.cat(
                 (
@@ -849,10 +885,13 @@ class Trainer:
         else:
             pred_imgs = torch.full(gt_imgs.shape, -1, device=self.device)
 
+        # --- MODIFICATION: Handle Multi-View for Plotting ---
+        # If input is (B, T, V, C, H, W), merge V into Width
         if pred_imgs.ndim == 6:
              pred_imgs = rearrange(pred_imgs, "b t v c h w -> b t c h (v w)")
              gt_imgs = rearrange(gt_imgs, "b t v c h w -> b t c h (v w)")
              reconstructed_gt_imgs = rearrange(reconstructed_gt_imgs, "b t v c h w -> b t c h (v w)")
+        # ----------------------------------------------------
 
         pred_imgs = rearrange(pred_imgs, "b t c h w -> (b t) c h w")
         gt_imgs = rearrange(gt_imgs, "b t c h w -> (b t) c h w")

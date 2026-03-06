@@ -171,15 +171,26 @@ def main(cfg: OmegaConf):
 
                     if patch_distances.shape[1] > n_hist:
                         d_start = patch_distances[:, n_hist] + 1e-8
-                        d_end = patch_distances[:, -1] + 1e-8
+                        d_end = patch_distances[:, -6] + 1e-8
+                        print("d start and end shape")
+                        print(d_start.shape)
+                        print(d_end.shape)
+
+                        print("T_span")
                         T_span = patch_distances.shape[1] - n_hist
+                        print(T_span)
                         
                         # Calculate Lyapunov exponent individually for all 196 patches
-                        lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start) # Shape: (B-1, 196)
-                        
+                        # lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start) # Shape: (B-1, 196)
+                        lyap_per_patch = torch.log(d_end / d_start) # Shape: (B-1, 196)
+
+                        print("lyap per patch shape")
+                        print(lyap_per_patch. shape)
                         # Extract the maximum exponent value and its corresponding patch index
                         max_lyap_vals, max_patch_indices = torch.max(lyap_per_patch, dim=-1)
-                        
+                        print("max lyap vals shape")
+                        print(max_lyap_vals.shape)
+                        print(max_patch_indices.shape)
                         lyap_exp_np = max_lyap_vals.cpu().numpy()
                         max_patch_idx_np = max_patch_indices.cpu().numpy()
                     else:

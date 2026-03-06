@@ -46,7 +46,7 @@ training:
 img_size: 112 # should be a multiple of 224
 
 frameskip: 1
-concat_dim: 1
+concat_dim: 0
 
 normalize_action: True
 
