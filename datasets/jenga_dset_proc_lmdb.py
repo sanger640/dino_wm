@@ -7,72 +7,59 @@ from einops import rearrange
 from typing import Callable, Optional, List
 import os
 import lmdb
+import time
+
+# FIX 1: Prevent OpenCV from spawning its own threads within PyTorch workers
+cv2.setNumThreads(0)
 
 from .traj_dset import TrajDataset, get_train_val_sliced
 
 class LazyVideo:
-    """
-    Reads images instantly from the LMDB key-value store using cv2 byte decoding.
-    """
-    def __init__(self, lmdb_env, ep_name, timestamps, cam_prefixes, freq_ratio, transform=None):
+    def __init__(self, lmdb_env, flat_keys_dict, start_idx, num_frames, cam_prefixes, transform=None):
         self.lmdb_env = lmdb_env
-        self.ep_name = ep_name
-        self.timestamps = timestamps
+        self.flat_keys_dict = flat_keys_dict
+        self.start_idx = start_idx
+        self.num_frames = num_frames
         self.cam_prefixes = cam_prefixes
-        self.freq_ratio = freq_ratio
         self.transform = transform
-        
-        self.shape = (len(timestamps) // freq_ratio, len(cam_prefixes), 3, 224, 224) 
+        self.shape = (num_frames, len(cam_prefixes), 3, 224, 224)
 
     def __len__(self):
-        return self.shape[0]
+        return self.num_frames
 
     def __getitem__(self, item):
         if isinstance(item, slice):
-            start = item.start if item.start is not None else 0
-            stop = item.stop if item.stop is not None else len(self)
-            step = item.step if item.step is not None else 1
-            indices = range(start, stop, step)
+            indices = range(*item.indices(self.num_frames))
         elif isinstance(item, int):
             indices = [item]
         else:
             raise TypeError("LazyVideo indices must be integers or slices")
 
         loaded_imgs = []
-        
-        # Open a lightning-fast read transaction
+        # txn is process-safe because of the PID check in the main dataset class
         with self.lmdb_env.begin(write=False) as txn:
             for action_idx in indices:
-                img_idx = action_idx * self.freq_ratio
+                safe_idx = min(action_idx, self.num_frames - 1)
+                global_idx = self.start_idx + safe_idx
                 t_imgs = []
                 
-                if img_idx < len(self.timestamps):
-                    ts = self.timestamps[img_idx]
-                    for prefix in self.cam_prefixes:
-                        # Construct the exact key we used in create_lmdb.py
-                        key = f"{self.ep_name}_{prefix}_{ts}".encode('ascii')
-                        
-                        # Fetch the raw byte-string from LMDB (virtually zero latency)
-                        img_bytes = txn.get(key)
-                        
-                        if img_bytes is not None:
-                            # Fast decode byte-string to numpy array using OpenCV
-                            img_array = np.frombuffer(img_bytes, dtype=np.uint8)
-                            img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-                            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                            t_imgs.append(img)
-                        else:
-                            print(f"Missing key in LMDB: {key}")
-                            t_imgs.append(np.zeros((224, 224, 3), dtype=np.uint8))
-                else:
-                    t_imgs = [np.zeros((224, 224, 3), dtype=np.uint8) for _ in self.cam_prefixes]
+                for prefix in self.cam_prefixes:
+                    key = self.flat_keys_dict[prefix][global_idx]
+                    img_bytes = txn.get(key)
+                    
+                    if img_bytes is not None:
+                        img_array = np.frombuffer(img_bytes, dtype=np.uint8)
+                        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                        t_imgs.append(img)
+                    else:
+                        t_imgs.append(np.zeros((224, 224, 3), dtype=np.uint8))
                 
                 loaded_imgs.append(np.stack(t_imgs))
 
         images = np.stack(loaded_imgs)
-        images = torch.from_numpy(images).float()
-        
-        images = rearrange(images, "t v h w c -> t v c h w") / 255.0
+        images = torch.from_numpy(images).float() / 255.0
+        images = rearrange(images, "t v h w c -> t v c h w")
 
         if self.transform:
             t, v, c, h, w = images.shape
@@ -80,163 +67,73 @@ class LazyVideo:
             images = self.transform(images)
             images = rearrange(images, "(t v) c h w -> t v c h w", t=t, v=v)
 
-        if isinstance(item, int):
-            return images[0]
-            
-        return images
-
+        return images[0] if isinstance(item, int) else images
 
 class JengaDataset(TrajDataset):
-    def __init__(
-        self,
-        data_path: str,
-        n_rollout: Optional[int] = None,
-        transform: Optional[Callable] = None,
-        normalize_action: bool = True,
-        img_ext: str = ".png",
-        action_freq: int = 10,
-        img_freq: int = 30,
-        cam_prefixes: List[str] = None, 
-    ):
+    def __init__(self, data_path, n_rollout=None, transform=None, normalize_action=True, cam_prefixes=None):
         self.data_path = Path(data_path)
         self.lmdb_path = self.data_path / "jenga_images.lmdb"
-        
+        self.cache_path = self.data_path / "prebaked_keys_flat.pth"
         self.transform = transform
         self.normalize_action = normalize_action
-        self.img_ext = img_ext
         self.cam_prefixes = cam_prefixes or ["cam1", "cam2"]
-        self.freq_ratio = int(img_freq / action_freq) 
-
-        # MULTIPROCESSING SAFETY: Do not open LMDB yet
+        
+        # FIX 2: Initialize LMDB placeholders as None
         self.lmdb_env = None 
-
-        self.episode_dirs = sorted(
-            [p for p in (self.data_path / "episodes").iterdir() if p.is_dir()],
-            key=lambda x: int(x.name) if x.name.isdigit() else x.name
-        )
+        self._lmdb_pid = -1
         
-        if n_rollout:
-            self.episode_dirs = self.episode_dirs[:n_rollout]
+        self.rank = int(os.environ.get("RANK", 0))
 
-        self.episodes_data = []
-        self.seq_lengths = []
-        
-        all_actions = []
-        all_proprios = []
-
-        print(f"Scanning {len(self.episode_dirs)} episodes for metadata...")
-
-        for ep_dir in self.episode_dirs:
-            json_files = list(ep_dir.glob("trajectory_*.json"))
-            if not json_files: continue
-            
-            with open(json_files[0], 'r') as f:
-                traj_data = json.load(f)
-            
-            waypoints = traj_data['waypoints']
-            img_dir = ep_dir / "rgb_frames"
-            
-            cam1_files = list(img_dir.glob(f"{self.cam_prefixes[0]}_*{self.img_ext}"))
-            if not cam1_files: continue
-
-            def get_ts(p):
-                try: return int(p.stem.split('_')[-1])
-                except ValueError: return 0
-
-            cam1_files.sort(key=get_ts)
-            valid_timestamps = [get_ts(f) for f in cam1_files]
-
-            n_images = len(valid_timestamps)
-            n_actions = len(waypoints)
-            max_valid_actions = n_images // self.freq_ratio
-            final_len = min(n_actions, max_valid_actions)
-            
-            if final_len < 2: continue 
-
-            self.seq_lengths.append(final_len)
-            
-            cmd_pos = np.array([wp['position'] for wp in waypoints], dtype=np.float32)[:final_len]
-            cmd_grip = np.array([[float(wp['gripper'])] for wp in waypoints], dtype=np.float32)[:final_len]
-            act_vec = np.concatenate([cmd_pos, cmd_grip], axis=-1)
-            
-            proc_pos = np.array([wp['proc_pos'] for wp in waypoints], dtype=np.float32)[:final_len]
-            proc_grip = np.array([[float(wp['proc_gripper'])] for wp in waypoints], dtype=np.float32)[:final_len]
-            proc_vec = np.concatenate([proc_pos, proc_grip], axis=-1)
-            
-            self.episodes_data.append({
-                "ep_name": ep_dir.name, 
-                "act_vec": torch.from_numpy(act_vec),
-                "proc_vec": torch.from_numpy(proc_vec),
-                "timestamps": valid_timestamps, 
-            })
-            
-            all_actions.append(torch.from_numpy(act_vec))
-            all_proprios.append(torch.from_numpy(proc_vec))
-
-        self.seq_lengths = torch.tensor(self.seq_lengths)
-        
-        if self.normalize_action and len(all_actions) > 0:
-            all_actions_cat = torch.cat(all_actions, dim=0)
-            self.action_mean = all_actions_cat.mean(dim=0)
-            self.action_std = all_actions_cat.std(dim=0) + 1e-6
-            
-            all_proprios_cat = torch.cat(all_proprios, dim=0)
-            self.proprio_mean = all_proprios_cat.mean(dim=0)
-            self.proprio_std = all_proprios_cat.std(dim=0) + 1e-6
+        if self.cache_path.exists():
+            print(f"[Rank {self.rank}] 🚀 Loading giant flat cache...")
+            cache = torch.load(self.cache_path)
+            self.flat_keys = cache['flat_keys']
+            self.episodes_meta = cache['episodes_meta']
+            self.action_mean, self.action_std = cache['action_mean'], cache['action_std']
+            self.proprio_mean, self.proprio_std = cache['proprio_mean'], cache['proprio_std']
         else:
-            self.action_mean = torch.zeros(4)
-            self.action_std = torch.ones(4)
-            self.proprio_mean = torch.zeros(4)
-            self.proprio_std = torch.ones(4)
-            
-        self.action_dim = 4
-        self.proprio_dim = 4
-        self.state_dim = 4
+            # (Standard Rank 0 baking logic remains the same...)
+            if self.rank == 0: self._bake_flat_array(n_rollout)
+            else:
+                while not self.cache_path.exists(): time.sleep(2)
+                cache = torch.load(self.cache_path)
+                self.flat_keys, self.episodes_meta = cache['flat_keys'], cache['episodes_meta']
+                self.action_mean, self.action_std = cache['action_mean'], cache['action_std']
+                self.proprio_mean, self.proprio_std = cache['proprio_mean'], cache['proprio_std']
+
+        self.action_dim = self.proprio_dim = self.state_dim = 4
 
     def _init_lmdb(self):
-        """Lazily initialize the LMDB connection exactly once per DataLoader worker."""
+        """
+        FIX 3: PID-Aware initialization. This prevents Segmentation Faults 
+        by ensuring workers don't share memory pointers with the main process.
+        """
+        current_pid = os.getpid()
+        if self._lmdb_pid != current_pid:
+            # We have been forked! Close old handles and reset.
+            self.lmdb_env = None
+            self._lmdb_pid = current_pid
+
         if self.lmdb_env is None:
-            if not self.lmdb_path.exists():
-                raise RuntimeError(f"LMDB database not found at {self.lmdb_path}. Run create_lmdb.py first!")
             self.lmdb_env = lmdb.open(
-                str(self.lmdb_path),
-                readonly=True,
-                lock=False,      # Essential for concurrent readers
-                readahead=False, # We are doing random access, disable OS readahead
-                meminit=False    # Speeds up opening
+                str(self.lmdb_path), 
+                readonly=True, 
+                lock=False, 
+                readahead=False, 
+                meminit=False
             )
 
-    def get_seq_length(self, idx):
-        return self.seq_lengths[idx]
+    def get_seq_length(self, idx): return self.episodes_meta[idx]["length"]
+    def __len__(self): return len(self.episodes_meta)
 
     def __getitem__(self, idx):
-        # 1. Ensure the LMDB environment is open for this worker
         self._init_lmdb()
-
-        ep_data = self.episodes_data[idx]
-        act_data = ep_data["act_vec"]
-        proc_data = ep_data["proc_vec"]
+        meta = self.episodes_meta[idx]
+        act = (meta["act_vec"] - self.action_mean) / self.action_std
+        proprio = (meta["proc_vec"] - self.proprio_mean) / self.proprio_std
+        visual_loader = LazyVideo(self.lmdb_env, self.flat_keys, meta["start_idx"], meta["length"], self.cam_prefixes, self.transform)
+        return {"visual": visual_loader, "proprio": proprio}, act, meta["proc_vec"], {}
         
-        act = (act_data - self.action_mean) / self.action_std
-        proprio = (proc_data - self.proprio_mean) / self.proprio_std
-        state = proc_data 
-
-        # 2. Pass the open LMDB environment and the Episode Name to LazyVideo
-        visual_loader = LazyVideo(
-            lmdb_env=self.lmdb_env,
-            ep_name=ep_data["ep_name"],
-            timestamps=ep_data["timestamps"],
-            cam_prefixes=self.cam_prefixes,
-            freq_ratio=self.freq_ratio,
-            transform=self.transform
-        )
-
-        obs = {"visual": visual_loader, "proprio": proprio}
-        return obs, act, state, {}
-
-    def __len__(self):
-        return len(self.seq_lengths)
-
 def load_jenga_slice_train_val(
     transform,
     n_rollout=None,
@@ -246,8 +143,8 @@ def load_jenga_slice_train_val(
     num_hist=0,
     num_pred=0,
     frameskip=1,
-    action_freq=10,
-    img_freq=30,
+    action_freq=10, # Keep in signature so Hydra config doesn't crash
+    img_freq=30,    # Keep in signature so Hydra config doesn't crash
     cam_serials=None, 
 ):
     dset = JengaDataset(
@@ -255,8 +152,6 @@ def load_jenga_slice_train_val(
         n_rollout=n_rollout,
         transform=transform,
         normalize_action=normalize_action,
-        action_freq=action_freq,
-        img_freq=img_freq,
         cam_prefixes=["cam1", "cam2"]
     )
     

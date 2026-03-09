@@ -1,0 +1,37 @@
+# --- Core Deep Learning (Optimized for CUDA 12.2) ---
+torch==2.3.1
+torchvision==0.18.1
+jax==0.4.28
+jaxlib==0.4.28
+tensorflow==2.15.1
+
+# --- Data & Image Processing ---
+lmdb
+opencv-python
+numpy
+pillow
+imageio
+imageio-ffmpeg
+scikit-image
+h5py
+
+# --- Robotics & Simulation ---
+# mujoco==3.2.7
+gym==0.21.0
+# dm-control==1.0.28
+# dm-env==1.6
+# pybullet==3.2.7
+
+# --- Infrastructure & Logging ---
+# hydra-core==1.2.0
+# omegaconf==2.3.0
+wandb==0.13.9
+einops==0.4.1
+tqdm==4.66.4
+requests==2.32.3
+scipy==1.13.1
+matplotlib==3.6.3
+
+accelerate
+psutil
+pyyaml
