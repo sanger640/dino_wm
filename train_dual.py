@@ -3,8 +3,8 @@ import time
 
 import ctypes
 
-import cv2
-cv2.setNumThreads(0)
+# import cv2
+# cv2.setNumThreads(0)
 
 # FORCE THE SYSTEM NCCL 2.26.2
 # nccl_path = "/cvmfs/soft.computecanada.ca/easybuild/software/2023/x86-64-v4/CUDA/gcccore/cuda12.2/nccl/2.26.2/lib/libnccl.so"
@@ -203,7 +203,7 @@ class Trainer:
                 prefetch_factor=2 if self.cfg.env.num_workers > 0 else None,
             )
         }
-        
+
         log.info(f"dataloader batch size: {self.cfg.gpu_batch_size}")
 
         self.dataloaders["train"], self.dataloaders["valid"] = self.accelerator.prepare(
