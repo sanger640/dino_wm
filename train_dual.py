@@ -1,5 +1,18 @@
 import os
 import time
+
+import ctypes
+
+import cv2
+cv2.setNumThreads(0)
+
+# FORCE THE SYSTEM NCCL 2.26.2
+# nccl_path = "/cvmfs/soft.computecanada.ca/easybuild/software/2023/x86-64-v4/CUDA/gcccore/cuda12.2/nccl/2.26.2/lib/libnccl.so"
+# if os.path.exists(nccl_path):
+#     ctypes.CDLL(nccl_path, mode=ctypes.RTLD_GLOBAL)
+#     print(f"DEBUG: Manually forced NCCL from {nccl_path}")
+# else:
+#     print("DEBUG: Could not find system NCCL path")
 import hydra
 import torch
 import wandb
@@ -26,6 +39,9 @@ from utils import slice_trajdict_with_t, cfg_to_dict, seed, sample_tensors
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
 
+print(f"Torch NCCL version: {torch.cuda.nccl.version()}")
+# print(f'H100 Ready: {torch.cuda.get_device_capability()}')
+
 class Trainer:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -36,28 +52,56 @@ class Trainer:
         model_name = cfg_dict["saved_folder"].split("outputs/")[-1]
         model_name += f"_{self.cfg.env.name}_f{self.cfg.frameskip}_h{self.cfg.num_hist}_p{self.cfg.num_pred}"
 
-        if HydraConfig.get().mode == RunMode.MULTIRUN:
-            log.info(" Multirun setup begin...")
-            log.info(f"SLURM_JOB_NODELIST={os.environ['SLURM_JOB_NODELIST']}")
-            log.info(f"DEBUGVAR={os.environ['DEBUGVAR']}")
-            # ==== init ddp process group ====
-            os.environ["RANK"] = os.environ["SLURM_PROCID"]
-            os.environ["WORLD_SIZE"] = os.environ["SLURM_NTASKS"]
-            os.environ["LOCAL_RANK"] = os.environ["SLURM_LOCALID"]
-            try:
-                dist.init_process_group(
-                    backend="nccl",
-                    init_method="env://",
-                    timeout=timedelta(minutes=5),  # Set a 5-minute timeout
-                )
-                log.info("Multirun setup completed.")
-            except Exception as e:
-                log.error(f"DDP setup failed: {e}")
-                raise
-            torch.distributed.barrier()
-            # # ==== /init ddp process group ====
+        # if HydraConfig.get().mode == RunMode.MULTIRUN:
+        #     log.info(" Multirun setup begin...")
+        #     log.info(f"SLURM_JOB_NODELIST={os.environ['SLURM_JOB_NODELIST']}")
+        #     log.info(f"DEBUGVAR={os.environ['DEBUGVAR']}")
+        #     # ==== init ddp process group ====
+        #     os.environ["RANK"] = os.environ["SLURM_PROCID"]
+        #     os.environ["WORLD_SIZE"] = os.environ["SLURM_NTASKS"]
+        #     os.environ["LOCAL_RANK"] = os.environ["SLURM_LOCALID"]
+        #     try:
+        #         dist.init_process_group(
+        #             backend="nccl",
+        #             init_method="env://",
+        #             timeout=timedelta(minutes=5),  # Set a 5-minute timeout
+        #         )
+        #         log.info("Multirun setup completed.")
+        #     except Exception as e:
+        #         log.error(f"DDP setup failed: {e}")
+        #         raise
+        #     torch.distributed.barrier()
+        #     # # ==== /init ddp process group ====
 
-        self.accelerator = Accelerator(log_with="wandb")
+        # IMP FOR DDP (ALI CHANGE)
+        is_slurm = "SLURM_PROCID" in os.environ
+        
+        if is_slurm:
+            log.info("Slurm environment detected. Mapping ranks...")
+            # Bridge Slurm variables to PyTorch variables
+            os.environ["RANK"] = os.environ.get("RANK", os.environ["SLURM_PROCID"])
+            os.environ["WORLD_SIZE"] = os.environ.get("WORLD_SIZE", os.environ["SLURM_NTASKS"])
+            os.environ["LOCAL_RANK"] = os.environ.get("LOCAL_RANK", os.environ["SLURM_LOCALID"])
+
+            if not dist.is_initialized():
+                try:
+                    # Increased timeout to 15m for large metadata scans/num_hist=3 loading
+                    dist.init_process_group(
+                        backend="nccl",
+                        init_method="env://",
+                        timeout=timedelta(minutes=15), 
+                    )
+                    log.info(f"DDP initialized: Rank {os.environ['RANK']} on Local Rank {os.environ['LOCAL_RANK']}")
+                except Exception as e:
+                    log.error(f"DDP setup failed: {e}")
+                    raise
+            torch.distributed.barrier()
+
+        # self.accelerator = Accelerator(log_with="wandb")
+        self.accelerator = Accelerator(
+            log_with="wandb",
+            mixed_precision="bf16" # Enable high-speed H100 math
+        )
         log.info(
             f"rank: {self.accelerator.local_process_index}  model_name: {model_name}"
         )
@@ -124,21 +168,42 @@ class Trainer:
 
         # --- MODIFICATION: Pinned Memory + Persistent Workers ---
         use_workers = self.cfg.env.num_workers > 0
+        # self.dataloaders = {
+        #     x: torch.utils.data.DataLoader(
+        #         self.datasets[x],
+        #         batch_size=self.cfg.gpu_batch_size,
+        #         shuffle=False, 
+        #         num_workers=self.cfg.env.num_workers,
+        #         collate_fn=None,
+        #         pin_memory=True, 
+        #         persistent_workers=use_workers, 
+        #         prefetch_factor=4 if use_workers else None,
+        #     )
+        #     for x in ["train", "valid"]
+        # }
+        # --------------------------------------------------------
         self.dataloaders = {
-            x: torch.utils.data.DataLoader(
-                self.datasets[x],
+            "train": torch.utils.data.DataLoader(
+                self.datasets["train"],
                 batch_size=self.cfg.gpu_batch_size,
                 shuffle=False, 
                 num_workers=self.cfg.env.num_workers,
-                collate_fn=None,
                 pin_memory=True, 
-                persistent_workers=use_workers, 
-                prefetch_factor=3 if use_workers else None,
+                persistent_workers=(self.cfg.env.num_workers > 0), 
+                prefetch_factor=4 if self.cfg.env.num_workers > 0 else None,
+            ),
+            "valid": torch.utils.data.DataLoader(
+                self.datasets["valid"],
+                batch_size=self.cfg.gpu_batch_size,
+                shuffle=False, 
+                # Keep validation workers slightly lower or the same
+                num_workers=min(self.cfg.env.num_workers, 2) if self.cfg.env.num_workers > 0 else 0,
+                pin_memory=True, 
+                persistent_workers=(self.cfg.env.num_workers > 0),
+                prefetch_factor=2 if self.cfg.env.num_workers > 0 else None,
             )
-            for x in ["train", "valid"]
         }
-        # --------------------------------------------------------
-
+        
         log.info(f"dataloader batch size: {self.cfg.gpu_batch_size}")
 
         self.dataloaders["train"], self.dataloaders["valid"] = self.accelerator.prepare(
@@ -353,6 +418,9 @@ class Trainer:
             self.model.front_head = self.front_head
             self.model.proprio_head = self.proprio_head
         # --------------------------------------------------------------
+        # if hasattr(torch, 'compile'):
+        #     log.info("Compiling model with TorchInductor for H100...")
+        #     self.model = torch.compile(self.model)
 
     def init_optimizers(self):
         self.encoder_optimizer = torch.optim.Adam(

@@ -1,7 +1,7 @@
-name: jenga
+name: jenga_single
 args: []
 kwargs: 
-  object_name: "jenga"
+  object_name: "jenga_single"
 
 load_dir: ""
 

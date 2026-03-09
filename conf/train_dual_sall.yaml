@@ -16,8 +16,8 @@ hydra:
     dir: ${ckpt_base_path}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
     # dir: ${ckpt_base_path}/outputs/2026-03-08/01-49-09/
   sweep:
-    # dir: ${ckpt_base_path}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
-    dir: ${ckpt_base_path}/outputs/2026-03-08/01-49-09
+    dir: ${ckpt_base_path}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    # dir: ${ckpt_base_path}/outputs/2026-03-08/01-49-09
     # subdir: ${hydra.job.num}
     subdir: ${hydra.job.num}
   launcher:
