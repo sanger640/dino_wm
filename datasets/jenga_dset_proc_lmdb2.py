@@ -18,7 +18,7 @@ class LazyVideo:
         self.cam_prefixes = cam_prefixes
         self.num_frames = num_frames
         self.transform = transform
-
+        self.shape = (num_frames, len(cam_prefixes), 3, 224, 224)
     def __len__(self):
         return self.num_frames
 
