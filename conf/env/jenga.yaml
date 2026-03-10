@@ -6,7 +6,7 @@ kwargs:
 load_dir: ""
 
 dataset:
-  _target_: "datasets.jenga_dset_proc_lmdb.load_jenga_slice_train_val"
+  _target_: "datasets.jenga_dset_proc_lmdb2.load_jenga_slice_train_val"
   n_rollout: null 
   normalize_action: ${normalize_action}
   # data_path: "/mnt/diffusion_policy/tasks/pick_place/dual_wrist/world_model/"

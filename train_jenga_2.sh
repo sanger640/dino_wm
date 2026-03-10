@@ -2,11 +2,11 @@
 #SBATCH --job-name=jenga_h3_b32
 #SBATCH --account=def-soojeon          # Your compute account
 #SBATCH --nodes=1                      # 1 Node
-#SBATCH --ntasks-per-node=2          # 2 Tasks (1 per GPU)
-#SBATCH --gres=gpu:h100:2              # 2 H100 GPUs
-#SBATCH --cpus-per-task=8              # 8 CPUs per GPU
-#SBATCH --mem=256G                     # Total Memory
-#SBATCH --time=5:00:00                # Max run time (24 hours)
+#SBATCH --ntasks-per-node=1         # 2 Tasks (1 per GPU)
+#SBATCH --gres=gpu:h100:1           # 2 H100 GPUs
+#SBATCH --cpus-per-task=8           # 8 CPUs per GPU
+#SBATCH --mem=32G                     # Total Memory
+#SBATCH --time=2:00:00                # Max run time (24 hours)
 #SBATCH --output=%j.out                # Log file named by Job ID
 #SBATCH --mail-user=a2budhwa@uwaterloo.ca
 #SBATCH --mail-type=BEGIN,END,FAIL
@@ -33,8 +33,31 @@ export WANDB_API_KEY="wandb_v1_1T3fkoYnH9gQScdRl2WtK4LXPWo_KTyn8OZq2cJlfUuEcmuez
 #     env.num_workers=4 \
 #     training.mixed_precision=bf16
 
+# srun --unbuffered \
+#     --ntasks=4 \
+#     --gpu-bind=closest \
+#     python train_dual.py \
+#     --config-name train_dual_sall \
+#     env=jenga \
+#     env.num_workers=4 \
+#     num_hist=3 \
+#     training.batch_size=64
+
+# srun --unbuffered \
+#     --ntasks=2 \
+#     --gpu-bind=closest \
+#     python train_dual.py \
+#     --config-name train_dual_sall \
+#     env=jenga \
+#     env.num_workers=4 \
+#     num_hist=2 \
+#     training.batch_size=64
+    # concat_dim=0 \
+    # action_emb_dim=384 \
+    # proprio_emb_dim=384
+
 srun --unbuffered \
-    --ntasks=2 \
+    --ntasks=1 \
     --gpu-bind=closest \
     python train_dual.py \
     --config-name train_dual_sall \
@@ -42,6 +65,6 @@ srun --unbuffered \
     env.num_workers=4 \
     num_hist=3 \
     hydra.run.dir="/home/ali313/scratch/dino_wm/outputs/2026-03-09/05-11-07" \
-    training.batch_size=32
+    training.batch_size=8
 
 ## add in it to start from last run
