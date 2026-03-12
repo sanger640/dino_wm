@@ -2,3 +2,8 @@ __pycache__
 *.pyc
 outputs
 plan_outputs
+outputs.zip:Zone.Identifier
+data/*
+point_maze.zip
+checkpoints/__MACOSX/._outputs
+point_maze.zip:Zone.Identifier

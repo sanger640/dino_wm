@@ -352,7 +352,7 @@ class PlanWorkspace:
 
 def load_ckpt(snapshot_path, device):
     with snapshot_path.open("rb") as f:
-        payload = torch.load(f, map_location=device)
+        payload = torch.load(f, map_location=device, weights_only=False)
     loaded_keys = []
     result = {}
     for k, v in payload.items():
@@ -369,7 +369,7 @@ def load_model(model_ckpt, train_cfg, num_action_repeat, device):
         result = load_ckpt(model_ckpt, device)
         print(f"Resuming from epoch {result['epoch']}: {model_ckpt}")
 
-    if "encoder" not in result:
+    if "encoder" not  in result:
         result["encoder"] = hydra.utils.instantiate(
             train_cfg.encoder,
         )
@@ -380,11 +380,11 @@ def load_model(model_ckpt, train_cfg, num_action_repeat, device):
         base_path = os.path.dirname(os.path.abspath(__file__))
         if train_cfg.env.decoder_path is not None:
             decoder_path = os.path.join(base_path, train_cfg.env.decoder_path)
-            ckpt = torch.load(decoder_path)
+            ckpt = torch.load(decoder_path, weights_only=False)
             if isinstance(ckpt, dict):
                 result["decoder"] = ckpt["decoder"]
             else:
-                result["decoder"] = torch.load(decoder_path)
+                result["decoder"] = torch.load(decoder_path, weights_only=False)
         else:
             raise ValueError(
                 "Decoder path not found in model checkpoint \
