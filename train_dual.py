@@ -78,11 +78,12 @@ class Trainer:
         
         if is_slurm:
             log.info("Slurm environment detected. Mapping ranks...")
+            # local_rank = int(os.environ["SLURM_LOCALID"])
             # Bridge Slurm variables to PyTorch variables
             os.environ["RANK"] = os.environ.get("RANK", os.environ["SLURM_PROCID"])
             os.environ["WORLD_SIZE"] = os.environ.get("WORLD_SIZE", os.environ["SLURM_NTASKS"])
             os.environ["LOCAL_RANK"] = os.environ.get("LOCAL_RANK", os.environ["SLURM_LOCALID"])
-
+            # torch.cuda.set_device(local_rank)
             if not dist.is_initialized():
                 try:
                     # Increased timeout to 15m for large metadata scans/num_hist=3 loading

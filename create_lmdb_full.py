@@ -3,16 +3,27 @@ import json
 import pickle
 import lmdb
 import numpy as np
+import argparse  # Added for CLI support
 from pathlib import Path
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 
-# --- CONFIG ---
-DATA_PATH = Path("/home/ali313/scratch/jenga_mujoco_noise")
+# --- ARGUMENT PARSING ---
+parser = argparse.ArgumentParser(description="Pack Jenga episodes into LMDB")
+parser.add_argument("--data_path", type=str, 
+                    default="/home/ali313/links/scratch/jenga_mujoco_noise",
+                    help="Path to the source dataset directory")
+parser.add_argument("--map_size_gb", type=int, default=50, 
+                    help="LMDB map size in GB")
+args = parser.parse_args()
+
+# --- CONFIG (Dynamically set from CLI) ---
+DATA_PATH = Path(args.data_path)
 LMDB_PATH = DATA_PATH / "jenga_unified.lmdb"
 NUM_WORKERS = min(32, multiprocessing.cpu_count())
-MAP_SIZE = 1024**4  # 1 Terabyte virtual limit
+# Increased default to 500GB based on your previous error
+MAP_SIZE = args.map_size_gb * 1024**3
 
 def process_episode(ep_dir):
     """Reads JSON + Images, returns LMDB key-value pairs and metadata stats."""
