@@ -6,14 +6,14 @@ kwargs:
 load_dir: ""
 
 dataset:
-  _target_: "datasets.jenga_dset_proc.load_jenga_slice_train_val"
+  _target_: "datasets.jenga_dset_single.load_jenga_slice_train_val"
   n_rollout: null 
   normalize_action: ${normalize_action}
-  # data_path: "/mnt/diffusion_policy/tasks/pick_place/dual_wrist/world_model/"
-  data_path: "/mnt/ssd_data/tasks/jenga_mujoco_noise"
+  data_path: "/home/corey/data/jenga_mujoco_noise"
+  
+  cam_prefixes: ["cam2"] # Strictly request single camera
 
   split_ratio: 0.9
-  # These are now critical for the 3x pairing logic
   action_freq: 10
   img_freq: 30
   transform:
@@ -21,4 +21,4 @@ dataset:
     img_size: ${img_size}
 
 decoder_path: null
-num_workers: 8  
+num_workers: 4
