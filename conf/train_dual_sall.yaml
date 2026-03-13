@@ -62,7 +62,7 @@ training:
   seed: 0
   epochs: 100
   batch_size: 32 # should >= nodes * tasks_per_node
-  save_every_x_epoch: 2
+  save_every_x_epoch: 5
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 2
   encoder_lr: 1e-6

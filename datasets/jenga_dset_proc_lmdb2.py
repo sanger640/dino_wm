@@ -7,7 +7,7 @@ import os
 import lmdb
 import pickle
 
-cv2.setNumThreads(0)
+# cv2.setNumThreads(0)
 from .traj_dset import TrajDataset, get_train_val_sliced
 
 class LazyVideo:
@@ -18,6 +18,7 @@ class LazyVideo:
         self.cam_prefixes = cam_prefixes
         self.num_frames = num_frames
         self.transform = transform
+        self.shape = (self.num_frames, len(cam_prefixes), 3, 224, 224)
 
     def __len__(self):
         return self.num_frames
