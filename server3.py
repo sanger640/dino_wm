@@ -86,6 +86,8 @@ def load_model(model_ckpt, train_cfg, device):
 
 @hydra.main(version_base=None, config_path="conf/", config_name="train_dual")
 def main(cfg: OmegaConf):
+    print("=== HYDRA RUNTIME CONFIG ===")
+    print(OmegaConf.to_yaml(cfg))
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     ckpt_path = Path(CHECKPOINT_PATH)
@@ -103,9 +105,10 @@ def main(cfg: OmegaConf):
         PROPRIO_MEAN, PROPRIO_STD = stats["proprio_mean"], stats["proprio_std"]
     else:
         print("Warning: dataset_stats.pt not found. Using hardcoded fallback stats.")
-        ACTION_MEAN = torch.tensor([0.4472, 0.0025, 0.4921, 0.0202], device=device)
-        ACTION_STD  = torch.tensor([0.0297, 0.0085, 0.0195, 0.1406], device=device)
-        PROPRIO_MEAN, PROPRIO_STD = ACTION_MEAN, ACTION_STD
+        ACTION_MEAN = torch.tensor([0.45678952, 0.00051019, 0.50954217, 0.21926114], device=device)
+        ACTION_STD  = torch.tensor([0.03182372, 0.01151787, 0.03419121, 0.41397065], device=device)
+        PROPRIO_MEAN = torch.tensor([0.4564166, 0.00056233, 0.50817657, 0.21921302], device=device)
+        PROPRIO_STD = torch.tensor([0.03217997, 0.01056713, 0.0327194,  0.4139551 ], device=device)
 
     inference_transform = transforms.Compose([
         transforms.Resize(TARGET_IMG_SIZE),
@@ -171,26 +174,26 @@ def main(cfg: OmegaConf):
 
                     if patch_distances.shape[1] > n_hist:
                         d_start = patch_distances[:, n_hist] + 1e-8
-                        d_end = patch_distances[:, -6] + 1e-8
-                        print("d start and end shape")
-                        print(d_start.shape)
-                        print(d_end.shape)
+                        d_end = patch_distances[:, -1] + 1e-8
+                        # print("d start and end shape")
+                        # print(d_start.shape)
+                        # print(d_end.shape)
 
-                        print("T_span")
+                        # print("T_span")
                         T_span = patch_distances.shape[1] - n_hist
-                        print(T_span)
+                        # print(T_span)
                         
                         # Calculate Lyapunov exponent individually for all 196 patches
                         # lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start) # Shape: (B-1, 196)
                         lyap_per_patch = torch.log(d_end / d_start) # Shape: (B-1, 196)
 
-                        print("lyap per patch shape")
-                        print(lyap_per_patch. shape)
+                        # print("lyap per patch shape")
+                        # print(lyap_per_patch. shape)
                         # Extract the maximum exponent value and its corresponding patch index
                         max_lyap_vals, max_patch_indices = torch.max(lyap_per_patch, dim=-1)
-                        print("max lyap vals shape")
-                        print(max_lyap_vals.shape)
-                        print(max_patch_indices.shape)
+                        # print("max lyap vals shape")
+                        # print(max_lyap_vals.shape)
+                        # print(max_patch_indices.shape)
                         lyap_exp_np = max_lyap_vals.cpu().numpy()
                         max_patch_idx_np = max_patch_indices.cpu().numpy()
                     else:
