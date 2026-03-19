@@ -1,7 +1,6 @@
 import os
 import zmq
 import torch
-import torch.nn.functional as F
 import numpy as np
 import hydra
 import time
@@ -11,11 +10,11 @@ from omegaconf import OmegaConf
 from torchvision import transforms
 
 # --- CONFIG ---
-CHECKPOINT_PATH = "/home/sanger/dino_wm/outputs/model_latest.pth" 
+CHECKPOINT_PATH = "/home/sanger/dino_wm/outputs/model_latest_single.pth" 
 PORT = 5556
 
 ALL_MODEL_KEYS = [
-    "encoder", "predictor", "decoder", "decoder_front", "decoder_wrist",
+    "encoder", "predictor", "decoder", 
     "proprio_encoder", "action_encoder",
 ]
 
@@ -31,7 +30,6 @@ def load_ckpt_payload(snapshot_path, device):
 def load_model(model_ckpt, train_cfg, device):
     model_ckpt = Path(model_ckpt)
     
-    # 1. Instantiate the Architecture (Blank)
     def get_component(cfg_section=None, **kwargs):
         if cfg_section and hasattr(train_cfg, cfg_section):
             return hydra.utils.instantiate(getattr(train_cfg, cfg_section), **kwargs)
@@ -45,9 +43,8 @@ def load_model(model_ckpt, train_cfg, device):
     instantiate_kwargs["action_encoder"] = get_component("action_encoder", in_chans=4, emb_dim=train_cfg.action_emb_dim)
 
     target_class = train_cfg.model._target_
-    is_dual = "dual" in target_class or "Dual" in target_class
     concat_dim = getattr(train_cfg, "concat_dim", 0)
-    num_views = 2 if is_dual else 1
+    num_views = 1 
     
     patch_size = 16 
     patches_per_view = (getattr(train_cfg, "img_size", 224) // patch_size) ** 2
@@ -55,12 +52,7 @@ def load_model(model_ckpt, train_cfg, device):
     predictor_dim = encoder_emb_dim + (getattr(train_cfg, "action_emb_dim", 0) + getattr(train_cfg, "proprio_emb_dim", 0)) if concat_dim == 1 else encoder_emb_dim
     
     instantiate_kwargs["predictor"] = get_component("predictor", dim=predictor_dim, num_patches=predictor_num_patches, num_frames=train_cfg.num_hist)
-    
-    if is_dual:
-        instantiate_kwargs["decoder_front"] = get_component("decoder", emb_dim=encoder_emb_dim)
-        instantiate_kwargs["decoder_wrist"] = get_component("decoder", emb_dim=encoder_emb_dim)
-    else:
-        instantiate_kwargs["decoder"] = get_component("decoder", emb_dim=encoder_emb_dim)
+    instantiate_kwargs["decoder"] = get_component("decoder", emb_dim=encoder_emb_dim)
 
     instantiate_kwargs.update({
         "proprio_dim": getattr(train_cfg, "proprio_emb_dim", 0),
@@ -75,34 +67,26 @@ def load_model(model_ckpt, train_cfg, device):
     model = hydra.utils.instantiate(train_cfg.model, **instantiate_kwargs)
     model.to(device)
 
-    # 2. Extract and Load Component Weights
     if model_ckpt.exists():
         print(f"📂 Loading payload from: {model_ckpt}")
         payload = torch.load(model_ckpt, map_location=device, weights_only=False)
         
-        # Map the saved dictionary keys to the actual model attributes
         component_map = {
-            "encoder": model.encoder,
+            "encoder": model.encoder, 
             "proprio_encoder": model.proprio_encoder,
-            "action_encoder": model.action_encoder,
+            "action_encoder": model.action_encoder, 
             "predictor": model.predictor,
-            "decoder_front": model.decoder_front,
-            "decoder_wrist": model.decoder_wrist,
-            "wrist_head": model.wrist_head,
-            "front_head": model.front_head,
-            "proprio_head": model.proprio_head
+            "decoder": model.decoder
         }
 
         for key, target_module in component_map.items():
             if key in payload and target_module is not None:
                 saved_obj = payload[key]
-                # Because train.py saves the nn.Module directly, we must call .state_dict()
                 state_dict = saved_obj if isinstance(saved_obj, dict) else saved_obj.state_dict()
-                
                 target_module.load_state_dict(state_dict)
                 print(f"  ✅ Loaded {key}")
             elif target_module is not None:
-                print(f"  ⚠️ Warning: '{key}' not found in checkpoint! Will be randomly initialized.")
+                print(f"  ⚠️ Warning: '{key}' not found in checkpoint!")
 
     else:
         print(f"🚨 FATAL: Checkpoint file not found at {model_ckpt}")
@@ -110,10 +94,98 @@ def load_model(model_ckpt, train_cfg, device):
     model.eval()
     return model
 
-@hydra.main(version_base=None, config_path="conf/", config_name="train_dual")
+def calc_msd(z_noisy, z_orig, n_hist, T_span):
+    squared_distances = torch.sum((z_noisy - z_orig) ** 2, dim=-1)
+                        
+    # 2. Average the distances strictly over the predicted future steps
+    #    Resulting shape: (B-1, 196)
+    msd_per_patch = torch.sum(squared_distances[:, n_hist:], dim=1) / T_span
+    
+    # (Optional) Zero-out microscopic precision errors to prevent random tracking on static frames
+    msd_per_patch[msd_per_patch < 1e-4] = 0.0
+
+    msd_per_patch[:, :28] = -float('inf')
+
+    # 3. Simple Max Patch extraction across all 196 patches
+    max_msd_vals, max_patch_indices = torch.max(msd_per_patch, dim=-1)
+    
+    # Assign to existing variables to maintain client compatibility
+    lyap_exp_np = max_msd_vals.cpu().numpy()
+    max_patch_idx_np = max_patch_indices.cpu().numpy()
+    return lyap_exp_np, max_patch_idx_np
+
+def le_cos(z_noisy, z_orig, n_hist, T_span):
+    cos_sim = torch.nn.functional.cosine_similarity(z_noisy, z_orig, dim=-1)
+    patch_distances = 1 - cos_sim
+    d_start = patch_distances[:, n_hist] + 1e-4
+    d_end = patch_distances[:, -1] + 1e-4
+    lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start) 
+
+    # Absolute Noise Floor (keeps it from triggering on float precision errors)
+    significant_drift_mask = d_end > 1e-3 
+    lyap_per_patch[~significant_drift_mask] = -float('inf')
+    lyap_per_patch[:, :28] = -float('inf')
+
+    # Simple Max Patch extraction across all 196 patches
+    max_lyap_vals, max_patch_indices = torch.max(lyap_per_patch, dim=-1)
+    lyap_exp_np = max_lyap_vals.cpu().numpy()
+    max_patch_idx_np = max_patch_indices.cpu().numpy()
+    return lyap_exp_np, max_patch_idx_np
+
+def le_l2(z_noisy, z_orig, n_hist, T_span):
+    patch_distances = torch.linalg.norm(z_noisy - z_orig, dim=-1)
+    d_start = patch_distances[:, n_hist] + 1e-4
+    d_end = patch_distances[:, -1] + 1e-4
+    lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start) 
+
+    # Absolute Noise Floor (keeps it from triggering on float precision errors)
+    significant_drift_mask = d_end > 1e-3 
+    lyap_per_patch[~significant_drift_mask] = -float('inf')
+    lyap_per_patch[:, :28] = -float('inf')
+
+    # Simple Max Patch extraction across all 196 patches
+    max_lyap_vals, max_patch_indices = torch.max(lyap_per_patch, dim=-1)
+    lyap_exp_np = max_lyap_vals.cpu().numpy()
+    max_patch_idx_np = max_patch_indices.cpu().numpy()
+    return lyap_exp_np, max_patch_idx_np
+
+def le_linf(z_noisy, z_orig, n_hist, T_span):
+    patch_distances = torch.linalg.norm(z_noisy - z_orig, ord=float('inf'), dim=-1)
+    d_start = patch_distances[:, n_hist] + 1e-4
+    d_end = patch_distances[:, -1] + 1e-4
+    lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start) 
+
+    # Absolute Noise Floor (keeps it from triggering on float precision errors)
+    significant_drift_mask = d_end > 1e-3 
+    lyap_per_patch[~significant_drift_mask] = -float('inf')
+    lyap_per_patch[:, :28] = -float('inf')
+
+    # Simple Max Patch extraction across all 196 patches
+    max_lyap_vals, max_patch_indices = torch.max(lyap_per_patch, dim=-1)
+    lyap_exp_np = max_lyap_vals.cpu().numpy()
+    max_patch_idx_np = max_patch_indices.cpu().numpy()
+    return lyap_exp_np, max_patch_idx_np
+
+def le_l1(z_noisy, z_orig, n_hist, T_span):
+    patch_distances = torch.linalg.norm(z_noisy - z_orig, ord=1, dim=-1)
+    d_start = patch_distances[:, n_hist] + 1e-4
+    d_end = patch_distances[:, -1] + 1e-4
+    lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start) 
+
+    # Absolute Noise Floor (keeps it from triggering on float precision errors)
+    significant_drift_mask = d_end > 1e-3 
+    lyap_per_patch[~significant_drift_mask] = -float('inf')
+    lyap_per_patch[:, :28] = -float('inf')
+
+    # Simple Max Patch extraction across all 196 patches
+    max_lyap_vals, max_patch_indices = torch.max(lyap_per_patch, dim=-1)
+    lyap_exp_np = max_lyap_vals.cpu().numpy()
+    max_patch_idx_np = max_patch_indices.cpu().numpy()
+    return lyap_exp_np, max_patch_idx_np
+
+@hydra.main(version_base=None, config_path="conf/", config_name="train") 
 def main(cfg: OmegaConf):
     print("=== HYDRA RUNTIME CONFIG ===")
-    print(OmegaConf.to_yaml(cfg))
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     ckpt_path = Path(CHECKPOINT_PATH)
@@ -155,15 +227,13 @@ def main(cfg: OmegaConf):
             def to_tensor(arr):
                 t = torch.from_numpy(arr).float().to(device)
                 if arr.dtype == np.uint8:
-                    print("ummmmm")
                     t = t / 255.0 
                 return t
-            print("viz start")
+            
             visual_t = to_tensor(message['visual'])
-            print("viz end")
             proprio_t = to_tensor(message['proprio'])
             actions_t = to_tensor(message['actions'])
-
+            
             if visual_t.ndim == 4: visual_t = visual_t.unsqueeze(0)
             if proprio_t.ndim == 2: proprio_t = proprio_t.unsqueeze(0)
             if actions_t.ndim == 2: actions_t = actions_t.unsqueeze(0)
@@ -171,82 +241,50 @@ def main(cfg: OmegaConf):
             proprio_t = (proprio_t - PROPRIO_MEAN) / PROPRIO_STD
             actions_t = (actions_t - ACTION_MEAN) / ACTION_STD
 
-            orig_shape = visual_t.shape
-            if visual_t.ndim == 6:
-                b, t, v, c, h, w = orig_shape
-                visual_t = visual_t.view(b * t * v, c, h, w)
-                visual_t = inference_transform(visual_t)
-                visual_t = visual_t.view(b, t, v, c, TARGET_IMG_SIZE, TARGET_IMG_SIZE)
+            b, t, c, h, w = visual_t.shape
+            visual_t = visual_t.view(b * t, c, h, w)
+            visual_t = inference_transform(visual_t)
+            visual_t = visual_t.view(b, t, c, TARGET_IMG_SIZE, TARGET_IMG_SIZE)
 
             obs_0 = {"visual": visual_t, "proprio": proprio_t}
 
             with torch.no_grad():
                 z_obses, _ = model.rollout(obs_0, actions_t)
+                
                 b_size = actions_t.shape[0]
+                n_hist = visual_t.shape[1]
                 
                 lyap_exp_np = None
                 max_patch_idx_np = None
                 
-                # --- 1. DIVERGENCE METRIC (PER-PATCH LYAPUNOV) ---
+                # --- SQUARED DISPLACEMENT (MSD) CALCULATION ---
                 if b_size > 1:
                     z_visual = z_obses['visual'] 
-                    n_hist = visual_t.shape[1]
+                    z_orig = z_visual[0:1] # (1, T, 196, 384)
+                    z_noisy = z_visual[1:] # (B-1, T, 196, 384)
                     
-                    z_front = z_visual[:, :, 196:392, :] 
-                    
-                    z_orig = z_front[0:1] # Shape: (1, T, 196, 384)
-                    z_noisy = z_front[1:] # Shape: (B-1, T, 196, 384)
-
-                    # Calculate L2 distance per patch
-                    cos_sim = torch.nn.functional.cosine_similarity(z_noisy, z_orig, dim=-1)
-                    patch_distances = 1 - cos_sim # High value = High divergence    
-                    # patch_distances = torch.norm(z_noisy - z_orig, dim=-1) # Shape: (B-1, T, 196)
-
-                    if patch_distances.shape[1] > n_hist:
-                        d_start = patch_distances[:, n_hist] + 1e-8
-                        d_end = patch_distances[:, -1] + 1e-8
-                        # print("d start and end shape")
-                        # print(d_start.shape)
-                        # print(d_end.shape)
-
-                        # print("T_span")
-                        T_span = patch_distances.shape[1] - n_hist
-                        # print(T_span)
+                    if z_visual.shape[1] > n_hist:
+                        T_span = z_visual.shape[1] - n_hist
                         
-                        # Calculate Lyapunov exponent individually for all 196 patches
-                        # lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start) # Shape: (B-1, 196)
-                        lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start) # Shape: (B-1, 196)
-
-                        # print("lyap per patch shape")
-                        # print(lyap_per_patch. shape)
-                        # Extract the maximum exponent value and its corresponding patch index
-                        max_lyap_vals, max_patch_indices = torch.max(lyap_per_patch, dim=-1)
-                        # print("max lyap vals shape")
-                        # print(max_lyap_vals.shape)
-                        # print(max_patch_indices.shape)
-                        lyap_exp_np = max_lyap_vals.cpu().numpy()
-                        max_patch_idx_np = max_patch_indices.cpu().numpy()
+                        # lyap_exp_np, max_patch_idx_np = calc_metrics(z_noisy, z_orig, n_hist, T_span)
+                        lyap_exp_np, max_patch_idx_np = le_cos(z_noisy, z_orig, n_hist, T_span)
                     else:
                         lyap_exp_np = np.zeros(b_size - 1)
                         max_patch_idx_np = np.zeros(b_size - 1, dtype=int)
 
-                # --- 2. DECODE IMAGES ---
-                has_decoder = (hasattr(model, "decoder_front") and model.decoder_front is not None)
-                
-                if has_decoder:
+                # --- DECODE VQ-VAE IMAGES ---
+                if hasattr(model, "decoder") and model.decoder is not None:
                     decoded_obs, _ = model.decode_obs(z_obses)
-                    pred_visual = decoded_obs['visual'] 
-
-                    pred_visual_np = pred_visual.cpu().numpy()
-                    pred_visual_np = (pred_visual_np + 1.0) / 2.0
-                    result_images = np.clip(pred_visual_np * 255, 0, 255).astype(np.uint8)
+                    pred_visual_np = (decoded_obs['visual'].cpu().numpy() + 1.0) / 2.0
+                    decoded_images = np.clip(pred_visual_np * 255, 0, 255).astype(np.uint8)
                 else:
-                    result_images = None
-            
+                    decoded_images = None
+
+            # SEND RESPONSE
             socket.send_pyobj({
-                'states': result_images, 
-                'lyapunov': lyap_exp_np,
-                'max_patch_idx': max_patch_idx_np,  # Include the spatial coordinate index
+                'states': decoded_images, # Shape: (B, T, C, H, W)
+                'lyapunov': lyap_exp_np,  # Now actually contains MSD values
+                'max_patch_idx': max_patch_idx_np,  
                 'inference_time': time.time() - start_time
             })
 

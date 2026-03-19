@@ -9,7 +9,7 @@ from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 
 # --- CONFIG ---
-DATA_PATH = Path("/home/corey/data/jenga_mujoco_noise")
+DATA_PATH = Path("/home/sanger/panda_express/tasks/jenga_mujoco_noise")
 LMDB_PATH = DATA_PATH / "jenga_single.lmdb" # Overwriting the same file
 NUM_WORKERS = min(32, multiprocessing.cpu_count())
 MAP_SIZE = 30*1024**3 # 1 Terabyte virtual limit

@@ -2,7 +2,7 @@ import lmdb
 import pickle
 
 # Update this path if your LMDB is located somewhere else
-lmdb_path = "/home/ali313/links/scratch/jenga_mujoco_noise/jenga_unified.lmdb"
+lmdb_path = "/home/sanger/jenga_mujoco_noise/jenga_single.lmdb"
 
 def print_lmdb_stats():
     print(f"Opening LMDB at: {lmdb_path}")
