@@ -94,26 +94,6 @@ def load_model(model_ckpt, train_cfg, device):
     model.eval()
     return model
 
-def calc_msd(z_noisy, z_orig, n_hist, T_span):
-    squared_distances = torch.sum((z_noisy - z_orig) ** 2, dim=-1)
-                        
-    # 2. Average the distances strictly over the predicted future steps
-    #    Resulting shape: (B-1, 196)
-    msd_per_patch = torch.sum(squared_distances[:, n_hist:], dim=1) / T_span
-    
-    # (Optional) Zero-out microscopic precision errors to prevent random tracking on static frames
-    msd_per_patch[msd_per_patch < 1e-4] = 0.0
-
-    msd_per_patch[:, :28] = -float('inf')
-
-    # 3. Simple Max Patch extraction across all 196 patches
-    max_msd_vals, max_patch_indices = torch.max(msd_per_patch, dim=-1)
-    
-    # Assign to existing variables to maintain client compatibility
-    lyap_exp_np = max_msd_vals.cpu().numpy()
-    max_patch_idx_np = max_patch_indices.cpu().numpy()
-    return lyap_exp_np, max_patch_idx_np
-
 def le_cos(z_noisy, z_orig, n_hist, T_span):
     cos_sim = torch.nn.functional.cosine_similarity(z_noisy, z_orig, dim=-1)
     patch_distances = 1 - cos_sim
@@ -121,63 +101,11 @@ def le_cos(z_noisy, z_orig, n_hist, T_span):
     d_end = patch_distances[:, -1] + 1e-4
     lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start) 
 
-    # Absolute Noise Floor (keeps it from triggering on float precision errors)
+    # Absolute Noise Floor
     significant_drift_mask = d_end > 1e-3 
     lyap_per_patch[~significant_drift_mask] = -float('inf')
     lyap_per_patch[:, :28] = -float('inf')
 
-    # Simple Max Patch extraction across all 196 patches
-    max_lyap_vals, max_patch_indices = torch.max(lyap_per_patch, dim=-1)
-    lyap_exp_np = max_lyap_vals.cpu().numpy()
-    max_patch_idx_np = max_patch_indices.cpu().numpy()
-    return lyap_exp_np, max_patch_idx_np
-
-def le_l2(z_noisy, z_orig, n_hist, T_span):
-    patch_distances = torch.linalg.norm(z_noisy - z_orig, dim=-1)
-    d_start = patch_distances[:, n_hist] + 1e-4
-    d_end = patch_distances[:, -1] + 1e-4
-    lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start) 
-
-    # Absolute Noise Floor (keeps it from triggering on float precision errors)
-    significant_drift_mask = d_end > 1e-3 
-    lyap_per_patch[~significant_drift_mask] = -float('inf')
-    lyap_per_patch[:, :28] = -float('inf')
-
-    # Simple Max Patch extraction across all 196 patches
-    max_lyap_vals, max_patch_indices = torch.max(lyap_per_patch, dim=-1)
-    lyap_exp_np = max_lyap_vals.cpu().numpy()
-    max_patch_idx_np = max_patch_indices.cpu().numpy()
-    return lyap_exp_np, max_patch_idx_np
-
-def le_linf(z_noisy, z_orig, n_hist, T_span):
-    patch_distances = torch.linalg.norm(z_noisy - z_orig, ord=float('inf'), dim=-1)
-    d_start = patch_distances[:, n_hist] + 1e-4
-    d_end = patch_distances[:, -1] + 1e-4
-    lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start) 
-
-    # Absolute Noise Floor (keeps it from triggering on float precision errors)
-    significant_drift_mask = d_end > 1e-3 
-    lyap_per_patch[~significant_drift_mask] = -float('inf')
-    lyap_per_patch[:, :28] = -float('inf')
-
-    # Simple Max Patch extraction across all 196 patches
-    max_lyap_vals, max_patch_indices = torch.max(lyap_per_patch, dim=-1)
-    lyap_exp_np = max_lyap_vals.cpu().numpy()
-    max_patch_idx_np = max_patch_indices.cpu().numpy()
-    return lyap_exp_np, max_patch_idx_np
-
-def le_l1(z_noisy, z_orig, n_hist, T_span):
-    patch_distances = torch.linalg.norm(z_noisy - z_orig, ord=1, dim=-1)
-    d_start = patch_distances[:, n_hist] + 1e-4
-    d_end = patch_distances[:, -1] + 1e-4
-    lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start) 
-
-    # Absolute Noise Floor (keeps it from triggering on float precision errors)
-    significant_drift_mask = d_end > 1e-3 
-    lyap_per_patch[~significant_drift_mask] = -float('inf')
-    lyap_per_patch[:, :28] = -float('inf')
-
-    # Simple Max Patch extraction across all 196 patches
     max_lyap_vals, max_patch_indices = torch.max(lyap_per_patch, dim=-1)
     lyap_exp_np = max_lyap_vals.cpu().numpy()
     max_patch_idx_np = max_patch_indices.cpu().numpy()
@@ -254,37 +182,45 @@ def main(cfg: OmegaConf):
                 b_size = actions_t.shape[0]
                 n_hist = visual_t.shape[1]
                 
-                lyap_exp_np = None
-                max_patch_idx_np = None
+                abs_max_le = 0.0
+                abs_max_patch_idx = 0
+                lyap_exp_np = np.zeros(max(1, b_size - 1))
+                worst_traj_idx = 0
                 
-                # --- SQUARED DISPLACEMENT (MSD) CALCULATION ---
-                if b_size > 1:
+                if b_size > 1 and z_obses['visual'].shape[1] > n_hist:
                     z_visual = z_obses['visual'] 
                     z_orig = z_visual[0:1] # (1, T, 196, 384)
                     z_noisy = z_visual[1:] # (B-1, T, 196, 384)
+                    T_span = z_visual.shape[1] - n_hist
                     
-                    if z_visual.shape[1] > n_hist:
-                        T_span = z_visual.shape[1] - n_hist
-                        
-                        # lyap_exp_np, max_patch_idx_np = calc_metrics(z_noisy, z_orig, n_hist, T_span)
-                        lyap_exp_np, max_patch_idx_np = le_cos(z_noisy, z_orig, n_hist, T_span)
-                    else:
-                        lyap_exp_np = np.zeros(b_size - 1)
-                        max_patch_idx_np = np.zeros(b_size - 1, dtype=int)
+                    lyap_exp_np, max_patch_idx_np = le_cos(z_noisy, z_orig, n_hist, T_span)
+                    
+                    abs_max_le = float(np.max(lyap_exp_np))
+                    worst_traj_idx = int(np.argmax(lyap_exp_np))
+                    abs_max_patch_idx = int(max_patch_idx_np[worst_traj_idx])
 
-                # --- DECODE VQ-VAE IMAGES ---
+                # --- NEW: DECODE ORIGINAL (0) AND WORST TRAJ (worst_traj_idx + 1) ---
                 if hasattr(model, "decoder") and model.decoder is not None:
-                    decoded_obs, _ = model.decode_obs(z_obses)
+                    if b_size > 1:
+                        # Extract the original and the specific trajectory that failed the hardest
+                        indices_to_decode = [0, worst_traj_idx + 1]
+                        z_obses_subset = {k: v[indices_to_decode] for k, v in z_obses.items()}
+                    else:
+                        z_obses_subset = {k: v[0:1] for k, v in z_obses.items()}
+                        
+                    decoded_obs, _ = model.decode_obs(z_obses_subset)
                     pred_visual_np = (decoded_obs['visual'].cpu().numpy() + 1.0) / 2.0
-                    decoded_images = np.clip(pred_visual_np * 255, 0, 255).astype(np.uint8)
+                    # Shape will be (2, T, C, H, W)
+                    decoded_images = np.clip(pred_visual_np * 255, 0, 255).astype(np.uint8) 
                 else:
                     decoded_images = None
 
-            # SEND RESPONSE
+            # SEND CONDENSED RESPONSE
             socket.send_pyobj({
-                'states': decoded_images, # Shape: (B, T, C, H, W)
-                'lyapunov': lyap_exp_np,  # Now actually contains MSD values
-                'max_patch_idx': max_patch_idx_np,  
+                'states': decoded_images, 
+                'max_lyapunov': abs_max_le,  
+                'max_patch_idx': abs_max_patch_idx,
+                'all_lyapunovs': lyap_exp_np, # Sent back so client can count triggers
                 'inference_time': time.time() - start_time
             })
 

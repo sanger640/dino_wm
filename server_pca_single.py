@@ -1,6 +1,7 @@
 import os
 import zmq
 import torch
+import torch.nn.functional as F
 import numpy as np
 import hydra
 import time
@@ -8,6 +9,8 @@ import logging
 from pathlib import Path
 from omegaconf import OmegaConf
 from torchvision import transforms
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
 
 # --- CONFIG ---
 CHECKPOINT_PATH = "/home/sanger/wksp/dino_wm/outputs/model_latest_single.pth" 
@@ -94,95 +97,6 @@ def load_model(model_ckpt, train_cfg, device):
     model.eval()
     return model
 
-def calc_msd(z_noisy, z_orig, n_hist, T_span):
-    squared_distances = torch.sum((z_noisy - z_orig) ** 2, dim=-1)
-                        
-    # 2. Average the distances strictly over the predicted future steps
-    #    Resulting shape: (B-1, 196)
-    msd_per_patch = torch.sum(squared_distances[:, n_hist:], dim=1) / T_span
-    
-    # (Optional) Zero-out microscopic precision errors to prevent random tracking on static frames
-    msd_per_patch[msd_per_patch < 1e-4] = 0.0
-
-    msd_per_patch[:, :28] = -float('inf')
-
-    # 3. Simple Max Patch extraction across all 196 patches
-    max_msd_vals, max_patch_indices = torch.max(msd_per_patch, dim=-1)
-    
-    # Assign to existing variables to maintain client compatibility
-    lyap_exp_np = max_msd_vals.cpu().numpy()
-    max_patch_idx_np = max_patch_indices.cpu().numpy()
-    return lyap_exp_np, max_patch_idx_np
-
-def le_cos(z_noisy, z_orig, n_hist, T_span):
-    cos_sim = torch.nn.functional.cosine_similarity(z_noisy, z_orig, dim=-1)
-    patch_distances = 1 - cos_sim
-    d_start = patch_distances[:, n_hist] + 1e-4
-    d_end = patch_distances[:, -1] + 1e-4
-    lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start) 
-
-    # Absolute Noise Floor (keeps it from triggering on float precision errors)
-    significant_drift_mask = d_end > 1e-3 
-    lyap_per_patch[~significant_drift_mask] = -float('inf')
-    lyap_per_patch[:, :28] = -float('inf')
-
-    # Simple Max Patch extraction across all 196 patches
-    max_lyap_vals, max_patch_indices = torch.max(lyap_per_patch, dim=-1)
-    lyap_exp_np = max_lyap_vals.cpu().numpy()
-    max_patch_idx_np = max_patch_indices.cpu().numpy()
-    return lyap_exp_np, max_patch_idx_np
-
-def le_l2(z_noisy, z_orig, n_hist, T_span):
-    patch_distances = torch.linalg.norm(z_noisy - z_orig, dim=-1)
-    d_start = patch_distances[:, n_hist] + 1e-4
-    d_end = patch_distances[:, -1] + 1e-4
-    lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start) 
-
-    # Absolute Noise Floor (keeps it from triggering on float precision errors)
-    significant_drift_mask = d_end > 1e-3 
-    lyap_per_patch[~significant_drift_mask] = -float('inf')
-    lyap_per_patch[:, :28] = -float('inf')
-
-    # Simple Max Patch extraction across all 196 patches
-    max_lyap_vals, max_patch_indices = torch.max(lyap_per_patch, dim=-1)
-    lyap_exp_np = max_lyap_vals.cpu().numpy()
-    max_patch_idx_np = max_patch_indices.cpu().numpy()
-    return lyap_exp_np, max_patch_idx_np
-
-def le_linf(z_noisy, z_orig, n_hist, T_span):
-    patch_distances = torch.linalg.norm(z_noisy - z_orig, ord=float('inf'), dim=-1)
-    d_start = patch_distances[:, n_hist] + 1e-4
-    d_end = patch_distances[:, -1] + 1e-4
-    lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start) 
-
-    # Absolute Noise Floor (keeps it from triggering on float precision errors)
-    significant_drift_mask = d_end > 1e-3 
-    lyap_per_patch[~significant_drift_mask] = -float('inf')
-    lyap_per_patch[:, :28] = -float('inf')
-
-    # Simple Max Patch extraction across all 196 patches
-    max_lyap_vals, max_patch_indices = torch.max(lyap_per_patch, dim=-1)
-    lyap_exp_np = max_lyap_vals.cpu().numpy()
-    max_patch_idx_np = max_patch_indices.cpu().numpy()
-    return lyap_exp_np, max_patch_idx_np
-
-def le_l1(z_noisy, z_orig, n_hist, T_span):
-    patch_distances = torch.linalg.norm(z_noisy - z_orig, ord=1, dim=-1)
-    d_start = patch_distances[:, n_hist] + 1e-4
-    d_end = patch_distances[:, -1] + 1e-4
-    lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start) 
-
-    # Absolute Noise Floor (keeps it from triggering on float precision errors)
-    significant_drift_mask = d_end > 1e-3 
-    lyap_per_patch[~significant_drift_mask] = -float('inf')
-    lyap_per_patch[:, :28] = -float('inf')
-
-    # Simple Max Patch extraction across all 196 patches
-    max_lyap_vals, max_patch_indices = torch.max(lyap_per_patch, dim=-1)
-    lyap_exp_np = max_lyap_vals.cpu().numpy()
-    max_patch_idx_np = max_patch_indices.cpu().numpy()
-    return lyap_exp_np, max_patch_idx_np
-
 @hydra.main(version_base=None, config_path="conf/", config_name="train") 
 def main(cfg: OmegaConf):
     print("=== HYDRA RUNTIME CONFIG ===")
@@ -252,39 +166,144 @@ def main(cfg: OmegaConf):
                 z_obses, _ = model.rollout(obs_0, actions_t)
                 
                 b_size = actions_t.shape[0]
+                t_total = z_obses['visual'].shape[1]
                 n_hist = visual_t.shape[1]
                 
-                lyap_exp_np = None
-                max_patch_idx_np = None
+                abs_max_le = 0.0
+                abs_max_patch_idx = 0
+                lyap_exp_np = np.zeros(max(1, b_size - 1))
+                worst_traj_idx = 0
+                pca_images = None
                 
-                # --- SQUARED DISPLACEMENT (MSD) CALCULATION ---
-                if b_size > 1:
+                if b_size > 0:
                     z_visual = z_obses['visual'] 
-                    z_orig = z_visual[0:1] # (1, T, 196, 384)
-                    z_noisy = z_visual[1:] # (B-1, T, 196, 384)
+                    z_orig = z_visual[0:1] 
+                    z_flat = z_orig.reshape(-1, z_visual.shape[-1]).cpu().numpy()
+                    num_flat_tokens = z_flat.shape[0]
                     
-                    if z_visual.shape[1] > n_hist:
-                        T_span = z_visual.shape[1] - n_hist
+                    # --- 1. STAGE 1 PCA & BACKGROUND MASK ---
+                    z_mean1 = z_flat.mean(axis=0)
+                    z_std1 = z_flat.std(axis=0) + 1e-6
+                    z_norm1 = (z_flat - z_mean1) / z_std1
+                    
+                    pca1 = PCA(n_components=1)
+                    pc1 = pca1.fit_transform(z_norm1)[:, 0]
+                    
+                    threshold = np.mean(pc1) + 0.5 * np.std(pc1)
+                    fg_mask = pc1 < threshold 
+                    z_fg = z_flat[fg_mask]
+                    canvas_features = np.zeros((num_flat_tokens, 3), dtype=np.float32)
+                    blocks_mask = np.zeros(num_flat_tokens, dtype=bool) 
+                    
+                    if len(z_fg) > 3: 
+                        # --- 2. STAGE 2 PCA (Object Coloring) ---
+                        z_mean2 = z_fg.mean(axis=0)
+                        z_std2 = z_fg.std(axis=0) + 1e-6
+                        z_norm2 = (z_fg - z_mean2) / z_std2
                         
-                        # lyap_exp_np, max_patch_idx_np = calc_metrics(z_noisy, z_orig, n_hist, T_span)
-                        lyap_exp_np, max_patch_idx_np = le_cos(z_noisy, z_orig, n_hist, T_span)
-                    else:
-                        lyap_exp_np = np.zeros(b_size - 1)
-                        max_patch_idx_np = np.zeros(b_size - 1, dtype=int)
+                        pca2 = PCA(n_components=3)
+                        pca2_proj = pca2.fit_transform(z_norm2)
+                        canvas_features[fg_mask] = pca2_proj
 
-                # --- DECODE VQ-VAE IMAGES ---
+                        # --- 3. K-MEANS OBJECT SEPARATION ---
+                        kmeans = KMeans(n_clusters=2, random_state=42, n_init="auto")
+                        cluster_labels = kmeans.fit_predict(z_fg)
+                        
+                        fg_indices = np.where(fg_mask)[0]
+                        cluster_0_mask = np.zeros(num_flat_tokens, dtype=bool)
+                        cluster_1_mask = np.zeros(num_flat_tokens, dtype=bool)
+                        
+                        cluster_0_mask[fg_indices[cluster_labels == 0]] = True
+                        cluster_1_mask[fg_indices[cluster_labels == 1]] = True
+                        
+                        c0_y_avg = np.mean((fg_indices[cluster_labels == 0] % 196) // 14) if np.sum(cluster_labels == 0) > 0 else 0
+                        c1_y_avg = np.mean((fg_indices[cluster_labels == 1] % 196) // 14) if np.sum(cluster_labels == 1) > 0 else 0
+                        
+                        if c0_y_avg > c1_y_avg:
+                            blocks_mask = cluster_0_mask
+                        else:
+                            blocks_mask = cluster_1_mask
+
+                    # --- 4. BLOCKS-SPECIFIC LYAPUNOV ---
+                    if b_size > 1 and z_visual.shape[1] > n_hist:
+                        z_noisy = z_visual[1:]
+                        cos_sim = torch.nn.functional.cosine_similarity(z_noisy, z_orig, dim=-1)
+                        patch_distances = 1 - cos_sim
+
+                        d_start = patch_distances[:, n_hist] + 1e-4
+                        d_end = patch_distances[:, -1] + 1e-4
+                        T_span = patch_distances.shape[1] - n_hist
+                        
+                        lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start) 
+
+                        # Apply K-Means Blocks Mask
+                        last_frame_mask = torch.from_numpy(blocks_mask[-196:]).bool().to(device)
+                        if last_frame_mask.sum() > 0:
+                            lyap_per_patch[:, ~last_frame_mask] = -float('inf')
+
+                        # Absolute Noise Floor
+                        significant_drift_mask = d_end > 1e-3 
+                        lyap_per_patch[~significant_drift_mask] = -float('inf')
+
+                        max_lyap_vals, max_patch_indices = torch.max(lyap_per_patch, dim=-1)
+                        lyap_exp_np = max_lyap_vals.cpu().numpy()
+                        max_patch_idx_np = max_patch_indices.cpu().numpy()
+
+                        abs_max_le = float(np.max(lyap_exp_np))
+                        worst_traj_idx = int(np.argmax(lyap_exp_np))
+                        abs_max_patch_idx = int(max_patch_idx_np[worst_traj_idx])
+                        
+                    # --- 5. PCA UPSAMPLING (BILINEAR) ---
+                    canvas_tensor = torch.from_numpy(canvas_features).view(1, t_total, 14, 14, 3).permute(0, 1, 4, 2, 3)
+                    fg_mask_tensor = torch.from_numpy(fg_mask).float().view(1, t_total, 1, 14, 14)
+                    
+                    upsampled_features = F.interpolate(
+                        canvas_tensor.reshape(t_total, 3, 14, 14), 
+                        size=(TARGET_IMG_SIZE, TARGET_IMG_SIZE), 
+                        mode='bilinear', align_corners=False
+                    ).view(1, t_total, 3, TARGET_IMG_SIZE, TARGET_IMG_SIZE)
+                    
+                    upsampled_mask = F.interpolate(
+                        fg_mask_tensor.reshape(t_total, 1, 14, 14), 
+                        size=(TARGET_IMG_SIZE, TARGET_IMG_SIZE), 
+                        mode='bilinear', align_corners=False
+                    ).view(1, t_total, 1, TARGET_IMG_SIZE, TARGET_IMG_SIZE)
+                    
+                    result_rgb = torch.zeros_like(upsampled_features)
+                    for i in range(3):
+                        channel_data = upsampled_features[0, :, i, :, :]
+                        p_min, p_max = channel_data.min(), channel_data.max()
+                        result_rgb[0, :, i, :, :] = (channel_data - p_min) / (p_max - p_min + 1e-6)
+
+                    hard_mask = upsampled_mask > 0.5
+                    result_rgb = result_rgb * hard_mask.float()
+                    
+                    # We only decode orig + worst, so we duplicate the PCA mask accordingly
+                    num_decoded = 2 if b_size > 1 else 1
+                    result_rgb = result_rgb.repeat(num_decoded, 1, 1, 1, 1)
+                    pca_images = (result_rgb.numpy() * 255).astype(np.uint8)
+
+                # --- 6. DECODE ORIGINAL (0) AND WORST TRAJ (worst_traj_idx + 1) ---
                 if hasattr(model, "decoder") and model.decoder is not None:
-                    decoded_obs, _ = model.decode_obs(z_obses)
+                    if b_size > 1:
+                        indices_to_decode = [0, worst_traj_idx + 1]
+                        z_obses_subset = {k: v[indices_to_decode] for k, v in z_obses.items()}
+                    else:
+                        z_obses_subset = {k: v[0:1] for k, v in z_obses.items()}
+                        
+                    decoded_obs, _ = model.decode_obs(z_obses_subset)
                     pred_visual_np = (decoded_obs['visual'].cpu().numpy() + 1.0) / 2.0
-                    decoded_images = np.clip(pred_visual_np * 255, 0, 255).astype(np.uint8)
+                    decoded_images = np.clip(pred_visual_np * 255, 0, 255).astype(np.uint8) 
                 else:
                     decoded_images = None
 
-            # SEND RESPONSE
+            # SEND CONDENSED RESPONSE
             socket.send_pyobj({
-                'states': decoded_images, # Shape: (B, T, C, H, W)
-                'lyapunov': lyap_exp_np,  # Now actually contains MSD values
-                'max_patch_idx': max_patch_idx_np,  
+                'states': decoded_images, 
+                'pca_mask': pca_images,
+                'max_lyapunov': abs_max_le,  
+                'max_patch_idx': abs_max_patch_idx,
+                'all_lyapunovs': lyap_exp_np, 
                 'inference_time': time.time() - start_time
             })
 
