@@ -1,3 +1,4 @@
+import argparse
 import os
 import json
 import pickle
@@ -9,7 +10,10 @@ from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 
 # --- CONFIG ---
-DATA_PATH = Path("/home/sanger/wksp/panda_express/tasks/jenga_mujoco_noise")
+# Defaults target the noisy replay set the world model was trained on. Override --data-path
+# to build from the clean teleop episodes instead (useful before replay_noisy.py has run).
+DEFAULT_DATA_PATH = Path("/home/sanger/wksp/panda_express/tasks/jenga_mujoco_noise")
+DATA_PATH = DEFAULT_DATA_PATH
 LMDB_PATH = DATA_PATH / "jenga_single.lmdb" # Overwriting the same file
 NUM_WORKERS = min(32, multiprocessing.cpu_count())
 MAP_SIZE = 20*1024**3 # 1 Terabyte virtual limit
@@ -159,4 +163,19 @@ def pack_parallel():
     print(f"✅ Success! Single-Cam LMDB size: {os.path.getsize(LMDB_PATH) / 1024**3:.2f} GB")
 
 if __name__ == "__main__":
+    p = argparse.ArgumentParser(description="Pack episodes into a single-camera (cam2) LMDB.")
+    p.add_argument("--data-path", default=str(DEFAULT_DATA_PATH),
+                   help="Task dir containing an episodes/ subdirectory")
+    p.add_argument("--lmdb-path", default=None,
+                   help="Output LMDB (default: <data-path>/jenga_single.lmdb)")
+    p.add_argument("--workers", type=int, default=NUM_WORKERS)
+    args = p.parse_args()
+
+    DATA_PATH = Path(args.data_path)
+    LMDB_PATH = Path(args.lmdb_path) if args.lmdb_path else DATA_PATH / "jenga_single.lmdb"
+    NUM_WORKERS = args.workers
+    LMDB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    print(f"source : {DATA_PATH}")
+    print(f"output : {LMDB_PATH}")
     pack_parallel()
