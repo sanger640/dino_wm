@@ -70,14 +70,25 @@ class Attention(nn.Module):
         qkv = self.to_qkv(x).chunk(3, dim = -1)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.heads), qkv)
 
-        dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
-        # apply causal mask
-        # dots = dots.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
-        dots = dots.masked_fill(self.bias.to(dots.device)[:, :, :T, :T] == 0, float("-inf"))
-        attn = self.attend(dots)
-        attn = self.dropout(attn)
+        # The (num_frames x num_patches)^2 attention matrix is by far the dominant cost of a
+        # safety-monitor rollout: N perturbed sequences x depth layers x (num_pred+1)
+        # autoregressive steps. Materialising it explicitly is both slow and memory-hungry,
+        # so route through the fused scaled-dot-product kernels. Same maths -- SDPA's default
+        # scale is 1/sqrt(dim_head), matching self.scale -- but it never forms the full
+        # matrix. The manual path is kept below for reference.
+        keep = self.bias.to(x.device)[:, :, :T, :T] != 0        # True = attend
+        out = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=keep,
+            dropout_p=self.dropout.p if self.training else 0.0,
+        )
 
-        out = torch.matmul(attn, v)
+        # --- reference implementation (equivalent, materialises the attention matrix) ---
+        # dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+        # dots = dots.masked_fill(self.bias.to(dots.device)[:, :, :T, :T] == 0, float("-inf"))
+        # attn = self.dropout(self.attend(dots))
+        # out = torch.matmul(attn, v)
+
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
 

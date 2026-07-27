@@ -177,12 +177,23 @@ class VWorldModel(nn.Module):
             visual = visual.unsqueeze(2)
             
         b, t, v, c, h, w = visual.shape
-        
-        visual = rearrange(visual, "b t v c h w -> (b t v) c h w")
-        visual = self.encoder_transform(visual)
-        visual_embs = self.encoder.forward(visual) 
-        
-        visual_embs = rearrange(visual_embs, "(b t v) p d -> b t (v p) d", b=b, t=t, v=v)
+
+        # The safety monitor rolls out N perturbed action sequences from ONE shared
+        # observation history, so every batch row carries identical frames and the encoder
+        # would redo the same DINOv2 forward N times. The equality check is a single fused
+        # GPU comparison, negligible against N x t x v ViT forwards; when rows differ (e.g.
+        # during training) it fails immediately and the normal path runs unchanged.
+        if b > 1 and torch.equal(visual, visual[0:1].expand_as(visual)):
+            shared = rearrange(visual[0:1], "b t v c h w -> (b t v) c h w")
+            shared = self.encoder_transform(shared)
+            shared_embs = self.encoder.forward(shared)
+            shared_embs = rearrange(shared_embs, "(b t v) p d -> b t (v p) d", b=1, t=t, v=v)
+            visual_embs = shared_embs.expand(b, -1, -1, -1)
+        else:
+            visual = rearrange(visual, "b t v c h w -> (b t v) c h w")
+            visual = self.encoder_transform(visual)
+            visual_embs = self.encoder.forward(visual)
+            visual_embs = rearrange(visual_embs, "(b t v) p d -> b t (v p) d", b=b, t=t, v=v)
 
         proprio = obs['proprio']
         proprio_emb = self.encode_proprio(proprio)

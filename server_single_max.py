@@ -199,8 +199,12 @@ def main(cfg: OmegaConf):
                     worst_traj_idx = int(np.argmax(lyap_exp_np))
                     abs_max_patch_idx = int(max_patch_idx_np[worst_traj_idx])
 
-                # --- NEW: DECODE ORIGINAL (0) AND WORST TRAJ (worst_traj_idx + 1) ---
-                if hasattr(model, "decoder") and model.decoder is not None:
+                # --- DECODE ORIGINAL (0) AND WORST TRAJ (worst_traj_idx + 1) ---
+                # Opt-in: the client only needs pixels for visualisation, but decoding runs
+                # the VQVAE over 2 x T frames and ships ~3.6MB back on every request. Clients
+                # that just want the score send return_states=False (or omit it).
+                want_states = bool(message.get("return_states", False))
+                if want_states and hasattr(model, "decoder") and model.decoder is not None:
                     if b_size > 1:
                         # Extract the original and the specific trajectory that failed the hardest
                         indices_to_decode = [0, worst_traj_idx + 1]
