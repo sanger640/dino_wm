@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision import transforms
 from einops import rearrange, repeat
 
@@ -23,6 +24,9 @@ class VWorldModel(nn.Module):
         train_encoder=True,
         train_predictor=False,
         train_decoder=True,
+        contrastive_weight=0.0,
+        contrastive_eps=0.05,
+        contrastive_gamma=0.9,
     ):
         super().__init__()
         self.num_hist = num_hist
@@ -36,6 +40,9 @@ class VWorldModel(nn.Module):
         self.train_encoder = train_encoder
         self.train_predictor = train_predictor
         self.train_decoder = train_decoder
+        self.contrastive_weight = contrastive_weight
+        self.contrastive_eps = contrastive_eps
+        self.contrastive_gamma = contrastive_gamma
         self.num_action_repeat = num_action_repeat
         self.num_proprio_repeat = num_proprio_repeat
         
@@ -280,7 +287,41 @@ class VWorldModel(nn.Module):
         
         if self.predictor is not None:
             z_pred = self.predict(z_src)
-            
+
+            # Contrastive stability loss: train the predictor to be contractive on the safe
+            # training distribution. For small action perturbations, the distance between
+            # predicted latents should shrink (or stay equal) over the prediction window.
+            # This makes FTLE < 0 for stable dynamics → threshold δ = 0 is principled.
+            # Gradients flow through predict() only; z_src_pert is computed with no_grad.
+            if self.training and self.contrastive_weight > 0.0:
+                with torch.no_grad():
+                    act_src = act[:, :self.num_hist]                          # (B, T_hist, 4)
+                    act_src_pert = act_src.clone()
+                    noise = torch.randn_like(act_src_pert[:, :, :3]) * self.contrastive_eps
+                    act_src_pert[:, :, :3] = act_src_pert[:, :, :3] + noise
+                    z_src_pert = self.replace_actions_from_z(z_src.clone(), act_src_pert)
+
+                z_pred_pert = self.predict(z_src_pert)
+
+                # Extract visual patch tokens from predictions (exclude proprio/action tokens)
+                if self.concat_dim == 0:
+                    z_v      = z_pred[:, :, :-2, :]       # (B, T_hist, P, D)
+                    z_v_pert = z_pred_pert[:, :, :-2, :]
+                else:
+                    n_extra  = self.proprio_dim + self.action_dim
+                    z_v      = z_pred[..., :-n_extra]
+                    z_v_pert = z_pred_pert[..., :-n_extra]
+
+                # d_start: cosine distance at first predicted step (B,)
+                # d_end:   cosine distance at last predicted step  (B,)
+                d_start = (1 - F.cosine_similarity(z_v[:, 0], z_v_pert[:, 0], dim=-1)).mean(dim=-1)
+                d_end   = (1 - F.cosine_similarity(z_v[:, -1], z_v_pert[:, -1], dim=-1)).mean(dim=-1)
+
+                # Penalise when divergence grows: d_end > γ · d_start
+                contrastive_loss = F.relu(d_end - self.contrastive_gamma * d_start).mean()
+                loss = loss + self.contrastive_weight * contrastive_loss
+                loss_components["contrastive_stability_loss"] = contrastive_loss
+
             if self.decoder_front is not None:
                 obs_pred, diff_pred = self.decode(
                     z_pred.detach()

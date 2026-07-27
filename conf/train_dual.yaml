@@ -106,6 +106,13 @@ model:
   decoder_wrist: ${decoder}
   # decoder_front: None
   # decoder_wrist: None
+  # Contrastive stability loss (Fix 3): trains predictor to be contractive on safe dynamics.
+  # Set contrastive_weight > 0 to enable. When active, small action perturbations at training
+  # time are penalised if they cause the predicted latent distance to grow (d_end > γ·d_start).
+  # This shifts the safe-trajectory FTLE baseline below 0, making threshold δ=0 principled.
+  contrastive_weight: 0.0   # set to 0.1 to enable; 0.0 = disabled (default, original behaviour)
+  contrastive_eps: 0.05     # action perturbation std (raw action space, same scale as inference)
+  contrastive_gamma: 0.9    # contraction target: d_end should be ≤ γ·d_start
 
 debug: False 
 
