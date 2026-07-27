@@ -1,0 +1,18 @@
+# Local conda environment for dino_wm / panda_express, 2026-07-27.
+#
+# Kept separate from environment.yaml, which is preserved as the historical record of the
+# original (python 3.9 / torch 2.3.0 / cu121) setup. That one cannot drive a Blackwell GPU.
+#
+# Conda here provides only the Python interpreter; every package comes from pip, so the
+# pinned set lives in requirements-local-cu128.txt and is shared with the cluster venv.
+#
+#     conda env create -f environment-cu128.yaml
+#     conda activate dino_wm
+name: dino_wm
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - -r requirements-local-cu128.txt
