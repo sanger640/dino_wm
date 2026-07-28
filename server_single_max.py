@@ -10,8 +10,33 @@ from omegaconf import OmegaConf
 from torchvision import transforms
 
 # --- CONFIG ---
-CHECKPOINT_PATH = "/home/sanger/wksp/dino_wm/outputs/model_latest_single.pth" 
+CHECKPOINT_PATH = "/home/sanger/wksp/dino_wm/outputs/model_latest_single.pth"
 PORT = 5556
+
+# --- PATCH MASK -------------------------------------------------------------------
+# FTLE is a max over patches, so any patch that carries no task signal but produces an
+# unstable log(d_end/d_start) ratio can set the score for the whole chunk. In the cam2
+# view the task occupies only a horizontal band; measured pixel occupancy per row
+# (see results/patch_grid_reference.png):
+#
+#   rows 0-1   arm / upper background      occupancy 22, 36
+#   rows 2-4   the blocks -- the task       occupancy 11, 15, 19   <- keep
+#   rows 5-7   blank table                  occupancy  8,  0,  0
+#   rows 8-13  checkered floor              occupancy 72, 21, 8-14  <- highest texture
+#
+# Rows 8-13 alone are 43% of the grid and were previously unmasked, so background floor
+# patches competed for the max in every chunk. Mask them alongside the original top 2 rows.
+PATCH_GRID = 14
+MASKED_ROWS = (0, 1, 8, 9, 10, 11, 12, 13)   # arm/upper background + checkered floor
+MASKED_PATCH_VALUE = -float("inf")
+
+
+def build_patch_keep_mask(num_patches, device):
+    """Boolean mask over patches: True = eligible to set the FTLE max (rows 2-7)."""
+    keep = torch.ones(num_patches, dtype=torch.bool, device=device)
+    for r in MASKED_ROWS:
+        keep[r * PATCH_GRID:(r + 1) * PATCH_GRID] = False
+    return keep
 
 ALL_MODEL_KEYS = [
     "encoder", "predictor", "decoder", 
@@ -102,9 +127,12 @@ def le_cos(z_noisy, z_orig, n_hist, T_span):
     lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start) 
 
     # Absolute Noise Floor
-    significant_drift_mask = d_end > 1e-3 
-    lyap_per_patch[~significant_drift_mask] = -float('inf')
-    lyap_per_patch[:, :28] = -float('inf')
+    significant_drift_mask = d_end > 1e-3
+    lyap_per_patch[~significant_drift_mask] = MASKED_PATCH_VALUE
+    # Was: lyap_per_patch[:, :28] = -inf  -- masked the top 2 rows only, leaving the
+    # blank table and the checkered floor (rows 5-13, 64% of patches) competing for the max.
+    keep = build_patch_keep_mask(lyap_per_patch.shape[-1], lyap_per_patch.device)
+    lyap_per_patch[:, ~keep] = MASKED_PATCH_VALUE
 
     max_lyap_vals, max_patch_indices = torch.max(lyap_per_patch, dim=-1)
     lyap_exp_np = max_lyap_vals.cpu().numpy()

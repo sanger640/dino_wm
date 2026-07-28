@@ -123,7 +123,22 @@ def _ftle(dist, n_hist):
     return (1.0 / T_span) * torch.log(d_end / d_start)
 
 
-MASK_TOP_ROWS = 28  # patches in top 2 rows (ceiling/background), same as server_single_max.py
+# --- PATCH MASK (kept in sync with server_single_max.py) ---------------------------
+# Only rows 2-4 of the 14x14 grid carry the blocks. Rows 0-1 are arm/upper background,
+# rows 5-7 blank table, rows 8-13 the checkered floor -- the floor alone is 43% of the
+# grid and has the highest texture in the frame. Since every metric below reduces over
+# patches (max, mean, top-k), untasked patches otherwise compete with the blocks.
+# Masked = original top 2 rows PLUS the floor; rows 2-7 are kept.
+PATCH_GRID = 14
+MASKED_ROWS = (0, 1, 8, 9, 10, 11, 12, 13)   # arm/upper background + checkered floor
+
+
+def patch_keep_mask(num_patches, device):
+    """Boolean mask over patches: True = task region (rows 2-7)."""
+    keep = torch.ones(num_patches, dtype=torch.bool, device=device)
+    for r in MASKED_ROWS:
+        keep[r * PATCH_GRID:(r + 1) * PATCH_GRID] = False
+    return keep
 
 
 def compute_score(z_orig, z_noisy, n_hist, mode, patch_stats=None):
@@ -144,7 +159,7 @@ def compute_score(z_orig, z_noisy, n_hist, mode, patch_stats=None):
     # Mask low-signal patches (noise floor) and top rows (ceiling background)
     lyap_masked = lyap_per_patch.clone()
     lyap_masked[d_end_pp < 1e-3] = -float("inf")
-    lyap_masked[:, :MASK_TOP_ROWS] = -float("inf")
+    lyap_masked[:, ~patch_keep_mask(lyap_masked.shape[-1], lyap_masked.device)] = -float("inf")
 
     # Per-trajectory max-patch FTLE (used for calibration output)
     patch_max_vals, patch_max_indices = torch.max(lyap_masked, dim=-1)  # (B-1,)
@@ -166,7 +181,7 @@ def compute_score(z_orig, z_noisy, n_hist, mode, patch_stats=None):
     elif mode == "ftle_mean_patch":
         # Ablation: mean over all (unmasked) patches instead of max
         valid = lyap_per_patch.clone()
-        valid[:, :MASK_TOP_ROWS] = float("nan")
+        valid[:, ~patch_keep_mask(valid.shape[-1], valid.device)] = float("nan")
         scores = torch.nanmean(valid, dim=-1)
         patch_max_indices = torch.zeros(valid.shape[0], dtype=torch.long, device=z_orig.device)
 
@@ -194,21 +209,21 @@ def compute_score(z_orig, z_noisy, n_hist, mode, patch_stats=None):
     elif mode == "final_cosine":
         # Baseline: final state cosine distance only (no FTLE ratio)
         final_dist = patch_dist_cos[:, -1, :]  # (B-1, 196)
-        final_dist[:, :MASK_TOP_ROWS] = 0.0
+        final_dist[:, ~patch_keep_mask(final_dist.shape[-1], final_dist.device)] = 0.0
         scores, patch_max_indices = torch.max(final_dist, dim=-1)
 
     elif mode == "mean_traj":
         # Baseline: mean cosine distance across predicted timesteps
         pred_dist = patch_dist_cos[:, n_hist:, :]  # (B-1, T_pred, 196)
         mean_dist = pred_dist.mean(dim=1)           # (B-1, 196)
-        mean_dist[:, :MASK_TOP_ROWS] = 0.0
+        mean_dist[:, ~patch_keep_mask(mean_dist.shape[-1], mean_dist.device)] = 0.0
         scores, patch_max_indices = torch.max(mean_dist, dim=-1)
 
     elif mode == "max_step":
         # Baseline: max cosine distance at any single predicted timestep
         pred_dist = patch_dist_cos[:, n_hist:, :]  # (B-1, T_pred, 196)
         max_dist = pred_dist.amax(dim=1)            # (B-1, 196)
-        max_dist[:, :MASK_TOP_ROWS] = 0.0
+        max_dist[:, ~patch_keep_mask(max_dist.shape[-1], max_dist.device)] = 0.0
         scores, patch_max_indices = torch.max(max_dist, dim=-1)
 
     elif mode == "ftle_variance":
@@ -227,7 +242,7 @@ def compute_score(z_orig, z_noisy, n_hist, mode, patch_stats=None):
         spread = 1.0 - F.cosine_similarity(
             z_final, mu.expand_as(z_final), dim=-1
         )                                              # (B-1, P)
-        spread[:, :MASK_TOP_ROWS] = 0.0
+        spread[:, ~patch_keep_mask(spread.shape[-1], spread.device)] = 0.0
         # Score per perturbation = how far it sits from the centroid at the worst patch
         scores, patch_max_indices = spread.max(dim=-1)  # (B-1,)
 
