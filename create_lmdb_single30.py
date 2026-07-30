@@ -38,6 +38,12 @@ def process_episode(ep_dir):
         act_times = np.array([w['timestamp'] for w in waypoints])
         act_raw = np.array([w['position'] + [float(w['gripper'])] for w in waypoints], dtype=np.float32)
         proc_raw = np.array([w['proc_pos'] + [float(w['proc_gripper'])] for w in waypoints], dtype=np.float32)
+        # Per-step block tilt, present only in episodes recorded after replay_noisy.py
+        # started logging it. Older datasets simply carry no tilt key, so probe scripts
+        # can detect its absence rather than silently training on zeros.
+        has_tilt = 'tilt_left' in waypoints[0]
+        tilt_raw = (np.array([[w['tilt_left'], w['tilt_right']] for w in waypoints],
+                             dtype=np.float32) if has_tilt else None)
     except Exception:
         return None
 
@@ -53,6 +59,7 @@ def process_episode(ep_dir):
     # 3. ALIGNMENT (Action-Centric Match)
     aligned_act = []
     aligned_proc = []
+    aligned_tilt = []
     valid_keys = {cam: []}
     kv_pairs = []
     
@@ -75,6 +82,8 @@ def process_episode(ep_dir):
         # Store the aligned pair
         aligned_act.append(act_raw[i])
         aligned_proc.append(proc_raw[i])
+        if tilt_raw is not None:
+            aligned_tilt.append(tilt_raw[i])
         valid_keys[cam].append(key_str)
         
         # Write the image bytes
@@ -91,6 +100,12 @@ def process_episode(ep_dir):
     # 4. Serialize and store vectors
     kv_pairs.append((f"{ep_name}_actions".encode('ascii'), pickle.dumps(final_act)))
     kv_pairs.append((f"{ep_name}_proprio".encode('ascii'), pickle.dumps(final_proc)))
+    # Tilt rides the identical alignment as actions/proprio, so index i of _tilt refers to
+    # the same rollout step as keys["cam2"][i]. Written only when the source episodes
+    # actually recorded it.
+    if aligned_tilt:
+        kv_pairs.append((f"{ep_name}_tilt".encode('ascii'),
+                         pickle.dumps(np.array(aligned_tilt, dtype=np.float32))))
 
     # Return clean, 1-to-1 matched metadata
     ep_info = {

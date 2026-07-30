@@ -26,6 +26,10 @@ PORT = 5556
 #
 # Rows 8-13 alone are 43% of the grid and were previously unmasked, so background floor
 # patches competed for the max in every chunk. Mask them alongside the original top 2 rows.
+# Scoring statistic: "dend_std" (cross-perturbation spread, AUC 0.816) or "ftle"
+# (the original double-max log-ratio, AUC 0.524). Override with MONITOR_METRIC=ftle.
+METRIC = os.environ.get("MONITOR_METRIC", "dend_std")
+
 PATCH_GRID = 14
 MASKED_ROWS = (0, 1, 8, 9, 10, 11, 12, 13)   # arm/upper background + checkered floor
 MASKED_PATCH_VALUE = -float("inf")
@@ -119,25 +123,105 @@ def load_model(model_ckpt, train_cfg, device):
     model.eval()
     return model
 
-def le_cos(z_noisy, z_orig, n_hist, T_span):
+def le_cos(z_noisy, z_orig, n_hist, T_span, metric=None):
+    """Score a chunk from the per-patch, per-perturbation latent divergences.
+
+    Returns (score, per_perturbation, max_patch_idx, worst_traj_idx).
+
+    metric="dend_std" (default) -- cross-perturbation spread of the FINAL divergence,
+        averaged over kept patches. Asks "does the predicted outcome depend on which
+        perturbation was applied", which is what instability means. Needs no reference
+        to the original trajectory beyond the distance itself, so world-model error on
+        the nominal rollout largely drops out.
+
+    metric="ftle" -- the original (1/T)log(d_end/d_start), max over patches then max over
+        perturbations. Kept for comparison and reproducibility.
+
+    Measured on 392 chunks (12 positive) from the 50-episode noisy set, AUC:
+        ftle       (max over patches, max over perturbations)   0.524   <- chance
+        ftle       (max over patches, median over perturbations) 0.741
+        d_end      (mean over both)                              0.793
+        dend_std   (spread across perturbations)                 0.816
+    The double maximum is the problem: an extremum over ~4100 values per chunk tracks
+    tail noise rather than instability. See estimator_study.py.
+    """
+    metric = metric or METRIC
     cos_sim = torch.nn.functional.cosine_similarity(z_noisy, z_orig, dim=-1)
     patch_distances = 1 - cos_sim
     d_start = patch_distances[:, n_hist] + 1e-4
     d_end = patch_distances[:, -1] + 1e-4
-    lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start) 
 
-    # Absolute Noise Floor
-    significant_drift_mask = d_end > 1e-3
-    lyap_per_patch[~significant_drift_mask] = MASKED_PATCH_VALUE
     # Was: lyap_per_patch[:, :28] = -inf  -- masked the top 2 rows only, leaving the
     # blank table and the checkered floor (rows 5-13, 64% of patches) competing for the max.
-    keep = build_patch_keep_mask(lyap_per_patch.shape[-1], lyap_per_patch.device)
-    lyap_per_patch[:, ~keep] = MASKED_PATCH_VALUE
+    keep = build_patch_keep_mask(d_end.shape[-1], d_end.device)
 
+    # Compute EVERY candidate unconditionally so a single evaluation run scores them all
+    # and no comparison is left with a missing baseline. Cheap: these are reductions over
+    # arrays already in memory.
+    _k = keep
+    de_k, ds_k = d_end[:, _k], d_start[:, _k]
+    lam_all = (1.0 / T_span) * torch.log(de_k / ds_k)          # per pert, per kept patch
+    floor_k = de_k > 1e-3
+    lam_floored = torch.where(floor_k, lam_all, torch.full_like(lam_all, -float("inf")))
+    per_pert_maxpatch = lam_floored.max(dim=-1).values           # (J,)
+    finite = torch.isfinite(per_pert_maxpatch)
+    # ensemble-spread growth: the FTLE construction applied to a second moment
+    lam_var = (1.0 / T_span) * torch.log((de_k.std(dim=0) + 1e-6) / (ds_k.std(dim=0) + 1e-6))
+
+    def _f(x):
+        x = float(x)
+        return x if np.isfinite(x) else float("nan")
+
+    alts = {
+        # --- divergence magnitude (no ratio) ---
+        "dend_std":               _f(de_k.std(dim=0).mean()),
+        "dend_mean":              _f(de_k.mean()),
+        "dend_p90":               _f(torch.quantile(de_k.flatten().float(), 0.90)),
+        "dend_max":               _f(de_k.max()),
+        "dend_maxpatch_meanpert": _f(de_k.max(dim=-1).values.mean()),
+        "dend_meanpatch_maxpert": _f(de_k.mean(dim=-1).max()),
+        # --- difference ---
+        "ddiff_mean":             _f((de_k - ds_k).mean()),
+        # --- log-ratio (FTLE family) ---
+        "ftle":                   _f(per_pert_maxpatch[finite].max() if finite.any() else float("nan")),
+        "ftle_maxpatch_meanpert": _f(per_pert_maxpatch[finite].mean() if finite.any() else float("nan")),
+        "ftle_maxpatch_medpert":  _f(per_pert_maxpatch[finite].median() if finite.any() else float("nan")),
+        "ftle_mean":              _f(lam_all.mean()),
+        # --- principled-zero family ---
+        "lambda_var_meanpatch":   _f(lam_var.mean()),
+        "lambda_var_medpatch":    _f(lam_var.median()),
+        "lambda_var_maxpatch":    _f(lam_var.max()),
+    }
+
+    # Any key of `alts` can be selected as the reported score via MONITOR_METRIC.
+    if metric in alts and metric not in ("ftle",):
+        spread = d_end.std(dim=0)
+        spread = torch.where(keep, spread, torch.zeros_like(spread))
+        max_patch_idx = int(torch.argmax(spread))
+        worst_traj_idx = int(torch.argmax(d_end[:, max_patch_idx]))
+        per_pert = d_end[:, keep].mean(dim=-1).cpu().numpy()
+        return alts[metric], per_pert, max_patch_idx, worst_traj_idx, alts
+
+    if metric == "dend_std":
+        spread = d_end.std(dim=0)                       # (P,) across perturbations
+        spread = torch.where(keep, spread, torch.zeros_like(spread))
+        score = float(spread[keep].mean())
+        max_patch_idx = int(torch.argmax(spread))
+        # for visualisation: the perturbation that diverged most at that patch
+        worst_traj_idx = int(torch.argmax(d_end[:, max_patch_idx]))
+        per_pert = d_end[:, keep].mean(dim=-1).cpu().numpy()
+        return score, per_pert, max_patch_idx, worst_traj_idx, alts
+
+    # --- original FTLE ---
+    lyap_per_patch = (1.0 / T_span) * torch.log(d_end / d_start)
+    significant_drift_mask = d_end > 1e-3               # absolute noise floor
+    lyap_per_patch[~significant_drift_mask] = MASKED_PATCH_VALUE
+    lyap_per_patch[:, ~keep] = MASKED_PATCH_VALUE
     max_lyap_vals, max_patch_indices = torch.max(lyap_per_patch, dim=-1)
-    lyap_exp_np = max_lyap_vals.cpu().numpy()
-    max_patch_idx_np = max_patch_indices.cpu().numpy()
-    return lyap_exp_np, max_patch_idx_np
+    per_pert = max_lyap_vals.cpu().numpy()
+    worst_traj_idx = int(np.argmax(per_pert))
+    return (float(np.max(per_pert)), per_pert,
+            int(max_patch_indices[worst_traj_idx]), worst_traj_idx, alts)
 
 @hydra.main(version_base=None, config_path="conf/", config_name="train") 
 def main(cfg: OmegaConf):
@@ -211,6 +295,7 @@ def main(cfg: OmegaConf):
                 n_hist = visual_t.shape[1]
                 
                 abs_max_le = 0.0
+                alt_scores = {}
                 abs_max_patch_idx = 0
                 lyap_exp_np = np.zeros(max(1, b_size - 1))
                 worst_traj_idx = 0
@@ -221,11 +306,8 @@ def main(cfg: OmegaConf):
                     z_noisy = z_visual[1:] # (B-1, T, 196, 384)
                     T_span = z_visual.shape[1] - n_hist
                     
-                    lyap_exp_np, max_patch_idx_np = le_cos(z_noisy, z_orig, n_hist, T_span)
-                    
-                    abs_max_le = float(np.max(lyap_exp_np))
-                    worst_traj_idx = int(np.argmax(lyap_exp_np))
-                    abs_max_patch_idx = int(max_patch_idx_np[worst_traj_idx])
+                    abs_max_le, lyap_exp_np, abs_max_patch_idx, worst_traj_idx, alt_scores = le_cos(
+                        z_noisy, z_orig, n_hist, T_span)
 
                 # --- DECODE ORIGINAL (0) AND WORST TRAJ (worst_traj_idx + 1) ---
                 # Opt-in: the client only needs pixels for visualisation, but decoding runs
@@ -253,6 +335,7 @@ def main(cfg: OmegaConf):
                 'max_lyapunov': abs_max_le,  
                 'max_patch_idx': abs_max_patch_idx,
                 'all_lyapunovs': lyap_exp_np, # Sent back so client can count triggers
+                'alt_scores': alt_scores,
                 'inference_time': time.time() - start_time
             })
 

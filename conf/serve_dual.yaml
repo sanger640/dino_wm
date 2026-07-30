@@ -1,0 +1,53 @@
+# Serving config for the dual-view world model.
+#
+# train_dual.yaml carries `override hydra/launcher: submitit_slurm` plus a hydra.launcher
+# block full of Slurm keys (gres, account, mail-user, module-load setup). That is correct
+# for cluster training and fatal locally -- hydra cannot find the plugin and aborts before
+# main() runs. This config keeps exactly the fields the inference server reads and drops
+# everything about job submission, so it must stay in sync with train_dual.yaml's model
+# section if the architecture changes.
+
+defaults:
+  - _self_
+  - env: jenga
+  - encoder: dino
+  - action_encoder: proprio
+  - proprio_encoder: proprio
+  - decoder: vqvae
+  - predictor: vit
+
+hydra:
+  run:
+    dir: ./outputs/serve/${now:%Y-%m-%d_%H-%M-%S}
+  output_subdir: null
+
+img_size: 224
+frameskip: 1
+concat_dim: 1
+normalize_action: True
+
+action_emb_dim: 10
+num_action_repeat: 1
+proprio_emb_dim: 10
+num_proprio_repeat: 1
+
+num_views: 2
+num_hist: 3
+num_pred: 1
+
+has_predictor: True
+has_decoder: True
+
+model:
+  _target_: models.dual_visual_world_model.VWorldModel
+  image_size: ${img_size}
+  num_hist: ${num_hist}
+  num_pred: ${num_pred}
+  train_encoder: False
+  train_predictor: False
+  train_decoder: False
+  decoder_front: ${decoder}
+  decoder_wrist: ${decoder}
+  contrastive_weight: 0.0
+
+debug: False
