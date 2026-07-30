@@ -164,12 +164,24 @@ true positives, so precision cannot exceed 22%. 12.9% ≈ 58% of that ceiling.
 **(h) "False alarms" are partly a labelling artifact.** Firing safe chunks contain 1.4-2.1x
 more ground-truth pixel motion and 2.2-3.4x more adjacent-block tilt than silent ones
 (d_end: 6.62° vs 1.92°), localised to ~7 patches clustered within 1-2 grid cells -- one
-object, not the sweeping arm. The binary topple/no-topple label scores a 15° wobble the same
-as a motionless scene, so **precision is understated**. Also: `get_block_tilt` only measures
+object, not the sweeping arm. NOTE 6.62° is INSIDE the normal standing mode (5.2-16.8°), so
+these are NOT near-misses -- the monitor discriminates within ordinary wobble. Precision is
+understated, but modestly; see (i). Also: `get_block_tilt` only measures
 block_left/block_right; the red TARGET block is untracked, so instability involving it is
 invisible to the label. sim.py/replay_noisy.py now record `tilt_middle` and `mid_xy` for
 future datasets (deliberately NOT added to check_failure -- the target block is meant to
 move).
+
+**(i) Do NOT change the failure threshold.** Peak adjacent-block tilt is starkly bimodal:
+70 episodes under 17.5 deg, 30 at 90-100, **zero in between**. So any threshold in 20-90 deg
+gives identical labels — 45 deg sits mid-gap. Cutting lower (inside the 5.2-16.8 deg standing
+mode) degrades every metric: probe 0.941 (45°) -> 0.899 (20°) -> 0.879 (15°) -> ~0.74-0.84
+(8-12°). And redefining failure to match what the monitor fires on would be circular.
+Two keepers from the sweep: the metric ordering **probe > d_end > ftle_pooled holds at all six
+thresholds** (so conclusions do not ride on the cut), and the probe still reaches 0.844 at
+8 deg, so sub-topple disturbance carries real signal. Also: at 20 deg the SAME 15 positives
+give AUC 0.899 vs 0.941 at 45 deg, because the crossing happens a few steps earlier — asking
+the monitor to fire sooner costs accuracy, confirming (f).
 
 ## 5. Gotchas that have burned this project four times
 

@@ -1104,3 +1104,55 @@ mistakes are more defensible mistakes.
 and `mid_xy` per waypoint. `block_middle` is deliberately NOT added to `check_failure` — the
 target block is meant to move, and counting it would corrupt the labels. A future
 regeneration can then test the target-block hypothesis directly instead of by inference.
+
+### 7.22 Should the failure definition change? No — and the data proves it can't matter
+
+Peak adjacent-block tilt over all 100 episodes of `jenga_tilt_100`:
+
+```
+  5- 10 deg :  23      20- 90 deg :   0
+ 10- 15 deg :  35      90-100 deg :  30
+ 15- 20 deg :  12
+```
+
+**Zero episodes between 17.5 and 90 deg.** The distribution is starkly bimodal — blocks stay
+under ~17 deg or end flat at ~90. No partial topples, no near-misses. **Any threshold in
+20-90 deg produces identical labels**, so the 45 deg cut sits mid-gap and is about as robust
+as a binary choice can be. Changing it in that range is cosmetic.
+
+> Corrects §7.21's framing: the false alarms land at 6.62 deg mean tilt, which is *inside*
+> the normal standing mode (5.2-16.8, median 11.1) — **not** near-misses. The monitor
+> discriminates within ordinary wobble. Precision is understated by less than §7.21 implied.
+
+The only redefinition that changes anything cuts INSIDE the standing mode
+(`failure_threshold_sweep.py`, 913 chunks, 50 held-out episodes, labels recomputed from
+scratch at each level, identical rollouts throughout):
+
+| threshold | positives | base rate | probe | `d_end` | `ftle_pooled` |
+|---|---|---|---|---|---|
+| 8° | 41 | 7.7% | 0.844 | 0.815 | 0.700 |
+| 10° | 35 | 5.9% | 0.808 | 0.778 | 0.664 |
+| 12° | 30 | 4.5% | 0.737 | 0.790 | 0.732 |
+| 15° | 21 | 2.8% | 0.879 | 0.818 | 0.698 |
+| 20° | 15 | 1.9% | 0.899 | 0.866 | 0.748 |
+| **45° (current)** | 15 | 1.9% | **0.941** | **0.887** | **0.785** |
+
+**Verdict: keep 45 deg.** (a) 20-90 deg is a no-op, (b) going lower degrades every metric,
+(c) redefining failure to match what the monitor fires on is circular — a change must be
+justified by the task ("a 15 deg wobble is operationally bad"), never by the metric.
+
+**Two results worth keeping from the sweep:**
+
+1. **The metric ordering is invariant.** probe > `d_end` > `ftle_pooled` at *all six*
+   thresholds without exception. Conclusions about which readout is best do not depend on
+   where the failure line is drawn — a stronger claim than any single-threshold comparison,
+   and it pre-empts the reviewer objection that the headline numbers ride on a hand-chosen cut.
+2. **The monitor does rank sub-topple disturbance.** At 8 deg, deep inside normal wobble, the
+   probe still reaches 0.844. The "false alarms" are not noise; there is real signal about
+   degrees of instability.
+
+**A subtle confirmation of finding (f).** At 20 deg there are the SAME 15 positives as at
+45 deg, yet AUC drops 0.941 -> 0.899. Crossing 20 deg happens a few steps earlier, so an
+earlier chunk becomes the positive one and the metrics score it lower. Asking the monitor to
+fire a few steps sooner costs measurable accuracy — independent evidence that it tracks the
+fall as it develops rather than predicting it far ahead.
