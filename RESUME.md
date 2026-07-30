@@ -1156,3 +1156,108 @@ justified by the task ("a 15 deg wobble is operationally bad"), never by the met
 earlier chunk becomes the positive one and the metrics score it lower. Asking the monitor to
 fire a few steps sooner costs measurable accuracy — independent evidence that it tracks the
 fall as it develops rather than predicting it far ahead.
+
+### 7.23 ftle_variance benchmarked — competitive, and cheaper conceptually
+
+Never benchmarked before (`metric_family_eval.py`). Spread of the 49 PERTURBED final
+latents around their own centroid, never referencing the original/unperturbed trajectory:
+
+```
+centroid[p] = mean_j z_pert_j[T,p]
+ftle_variance[p] = mean_j (1 - cos(z_pert_j[T,p], centroid[p]))
+```
+
+799 held-out chunks, identical to section 7.16/7.22's setup:
+
+| metric | AUC |
+|---|---|
+| probe | 0.941 |
+| `d_end` | 0.887 |
+| **`ftle_variance`** | **0.858** |
+| `ftle_pooled` | 0.785 |
+
+Beats every FTLE-ratio variant from section 7.19, including the best one (`ftle_pooled`).
+Sidesteps the whole d_start problem by construction (no division by anything near the noise
+floor), at the cost of never comparing to what the unperturbed action would have done — it
+answers "how much do perturbations disagree with each other", not "how far does the
+perturbed future diverge from the actual one".
+
+### 7.24 Held-out validation of PCA truncation and the PC1 mask — corrects section 7.15
+
+**PCA truncation does not survive cross-validation.** 20 episode splits, (m,k) grid searched
+on train half only (`pca_mask_heldout.py`, corrected reduction — see caveat below):
+
+| | held-out AUC | selection |
+|---|---|---|
+| PCA x low-norm mask | 0.895 | **m=384 (no truncation) chosen 20/20 times**, k=30 (18/20) or k=20 (2/20) |
+| unmasked baseline | 0.700 | — |
+
+Every single split picked the FULL feature space. Section 7.15's m=4 winner (0.855/0.876)
+was overfit to the 225-chunk sample it was picked on. **Drop PCA truncation from the
+pipeline** — only the low-norm mask component was ever real.
+
+**The (corrected, signed) PC1 mask held up better than expected:**
+
+| | held-out AUC | selection |
+|---|---|---|
+| PC1 mask | **0.941** | **75% keep chosen 20/20 times** (zero variance) |
+
+Now scores ABOVE the low-norm mask's own held-out result (section 7.2: mean 0.848),
+reversing section 7.15's in-sample read where PC1 underperformed.
+
+> **Reduction bug found and fixed mid-task.** The score() this borrowed from
+> pca_mask_combo.py flattened over (perturbation, patch) before taking p90 (~4000 pooled
+> values) instead of averaging over perturbations FIRST then taking p90 over patches
+> (~54-84 values) -- the convention used everywhere else since section 7.1. The buggy
+> version gave AUC 0.92-0.94 for PCA+mask; fixed, it gives 0.895. **This means section
+> 7.15's 0.876 in-sample PCA+mask reference has the same bug and should not be trusted
+> either.**
+>
+> Even after the fix, both numbers here (0.895, 0.941) sit above section 7.2's full-corpus
+> held-out figures (0.838-0.854, 1772 chunks). This run used the same 225-chunk/91-episode
+> subsample as pca_mask_combo.py -- smaller, noisier test halves (~112 chunks, ~12-13
+> positives) than the full pool. Trust the RELATIVE ordering (PC1 >= PCA+mask >> unmasked,
+> PCA truncation contributes nothing) since both share the identical sample; do not cite
+> 0.895 or 0.941 as replacements for section 7.2's numbers without a full-corpus rerun.
+
+### 7.25 Probe calibration — good ranking, poor face-value magnitude
+
+`metric_family_eval.py`, all held-out chunks, predicted vs actual future tilt:
+
+| predicted bin | n | mean pred | mean actual | bias |
+|---|---|---|---|---|
+| 0-5° | 260 | 2.37 | 1.39 | -0.99 |
+| 15-20° | 20 | 16.64 | 6.69 | -9.96 |
+| 20-30° | 18 | 24.94 | 7.95 | -16.99 |
+| **30-45°** | 19 | 37.30 | 8.92 | **-28.38** |
+| 45-70° | 11 | 55.37 | 27.84 | -27.53 |
+
+**Global regression: actual = 0.48 x predicted + 0.83.** Well-calibrated would be slope~1,
+intercept~0. Right where halt decisions get made (predicted 15-45 deg, between the p80 and
+p99 thresholds), the probe systematically overpredicts by 10-28 deg -- a "37 deg" prediction
+averages 9 deg true tilt.
+
+**AUC 0.941 says ranking is sound; the raw score is not an interpretable degree estimate.**
+Fine for percentile-thresholded classification (what section 7.16/7.22 do); would need
+isotonic regression or similar before reporting it as a face-value physical prediction.
+
+### 7.26 Threshold stability under resampling — the probe is the hardest to calibrate
+
+2000-rep episode bootstrap of the SAFE chunk pool, threshold value (not AUC) per resample:
+
+| metric | p80 CV | p90 CV | p95 CV | p99 CV | p95 95% CI |
+|---|---|---|---|---|---|
+| **probe** | 0.09 | 0.18 | **0.27** | 0.12 | **[14.4, 33.8] deg** |
+| `d_end` | 0.03 | 0.03 | 0.04 | 0.11 | [0.064, 0.074] |
+| **`ftle_pooled`** | 0.01 | 0.01 | 0.01 | 0.03 | [0.410, 0.426] |
+| `ftle_variance` | 0.04 | 0.03 | 0.02 | 0.06 | [0.036, 0.039] |
+
+**The probe's p95 threshold could land anywhere from 14 deg to 34 deg** depending on which
+50 safe episodes happen to be in the calibration sample -- a >2x range. `ftle_pooled` is the
+most reproducible across every quantile (CV 0.01-0.03), consistent with section 7.25: the
+same heavy-tailed, compressed score distribution that causes the calibration bias also makes
+the probe's percentiles unstable under resampling.
+
+**Trade-off to state plainly in the paper:** the probe discriminates best (AUC 0.941) but is
+the least reliable of the four to calibrate from limited held-out data. A single calibration
+run on this system could hand you a materially wrong threshold.

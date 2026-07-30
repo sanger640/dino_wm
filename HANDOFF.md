@@ -183,6 +183,28 @@ thresholds** (so conclusions do not ride on the cut), and the probe still reache
 give AUC 0.899 vs 0.941 at 45 deg, because the crossing happens a few steps earlier — asking
 the monitor to fire sooner costs accuracy, confirming (f).
 
+**(j) ftle_variance is competitive** (AUC 0.858) -- spread of the 49 perturbed latents
+around their own centroid, never touching the original trajectory. Beats every FTLE-ratio
+variant tried. Never benchmarked before this; now the second-best divergence metric behind
+d_end.
+
+**(k) PCA truncation does NOT survive cross-validation -- drop it.** 20 held-out episode
+splits picked full-space (m=384) 20/20 times; section 7.15's m=4 winner was overfit to a
+225-chunk sample. Found via a REDUCTION BUG in pca_mask_combo.py (flattened perturbation x
+patch before p90 instead of averaging perturbations first) that also means section 7.15's
+0.876 in-sample PCA+mask number should not be trusted. The signed PC1 mask, properly
+validated, held up (0.941 held-out, 75% keep chosen 20/20 times) -- but this and the PCA
+result both used a small 225-chunk subsample with noisier test halves than the full corpus;
+treat the ORDERING as real (PC1 >= mask+PCA >> unmasked) more than the absolute numbers.
+
+**(l) The probe ranks well but is poorly calibrated and hard to threshold.** Global
+regression actual = 0.48*predicted + 0.83 (well-calibrated = slope 1, intercept 0); in the
+15-45 deg decision band it overpredicts by 10-28 deg. Its threshold is also the least
+reproducible of any metric under resampling (p95 CV 0.27, 95% CI [14.4, 33.8] deg) vs
+ftle_pooled's CV 0.01. AUC 0.941 is real and the ranking is trustworthy; the raw score is
+NOT an interpretable degree estimate, and a single calibration run could hand you a
+materially wrong threshold.
+
 ## 5. Gotchas that have burned this project four times
 
 **Silent failures where the artifact looks complete.** In order of discovery:
