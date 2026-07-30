@@ -58,6 +58,9 @@ def main():
     ap.add_argument("--n-fit-episodes", type=int, default=50)
     ap.add_argument("--lam", type=float, default=10.0)
     ap.add_argument("--fps", type=int, default=15)
+    ap.add_argument("--episodes", default=None,
+                    help="comma-separated episode ids; default picks by catch status")
+    ap.add_argument("--thresholds", default="p80,p99")
     ap.add_argument("--outdir", default="/home/sanger/wksp/panda_express/results/threshold_videos")
     args = ap.parse_args()
 
@@ -137,10 +140,13 @@ def main():
             epdata[ep] = dict(starts=starts, scores=scores, gts=gts, frames=frames,
                               fstep=fstep, tilt=tilt)
 
-        THR = {"p80": float(np.percentile(safe_scores, 80)),
-               "p99": float(np.percentile(safe_scores, 99))}
+        # thresholds are built from whatever --thresholds asks for, plus the p80/p99 pair
+        # the default episode-selection logic needs
+        tags = [t.strip() for t in args.thresholds.split(",")]
+        THR = {t: float(np.percentile(safe_scores, float(t.lstrip("p"))))
+               for t in set(tags) | {"p80", "p99"}}
         print(f"thresholds from {len(safe_scores)} safe chunks: "
-              f"p80={THR['p80']:.2f} deg, p99={THR['p99']:.2f} deg")
+              + ", ".join(f"{t}={THR[t]:.2f} deg" for t in sorted(THR)))
 
         def fires_at(ep, thr):
             d = epdata[ep]
@@ -156,14 +162,32 @@ def main():
         print(f"{len(fails)} held-out failures | p99 catches {len(caught99)} | "
               f"p80-only catches {len(only80)}")
 
-        jobs = [(e, "p99") for e in caught99[:2]] + [(e, "p80") for e in (only80 or caught99)[:2]]
+        if args.episodes:
+            want = [e.strip() for e in args.episodes.split(",")]
+            sel = [e for e in want if e in epdata and epdata[e]["starts"]]
+            missing = [e for e in want if e not in sel]
+            if missing:
+                print(f"  skipping (not held out / no chunks): {missing}")
+            jobs = [(e, t) for e in sel for t in tags]
+        else:
+            jobs = ([(e, "p99") for e in caught99[:2]]
+                    + [(e, "p80") for e in (only80 or caught99)[:2]])
+        print(f"rendering {len(jobs)} videos")
 
         for ep, tag in jobs:
             d = epdata[ep]; thr = THR[tag]
             fire = fires_at(ep, thr)
             starts, scores, gts = d["starts"], d["scores"], d["gts"]
-            lead = (d["fstep"] - fire) if fire is not None else None
-            vid = out / f"ep{ep}_{tag}_{'CAUGHT' if fire is not None else 'MISSED'}.mp4"
+            # a success episode has no fstep, so an alarm there is a false positive
+            # with no lead time to report
+            lead = (d["fstep"] - fire) if (fire is not None and d["fstep"] is not None) else None
+            # name by what actually happened: firing on a success is a FALSE ALARM,
+            # not a "catch"
+            if d["fstep"] is None:
+                outcome = "FALSEALARM" if fire is not None else "ok-silent"
+            else:
+                outcome = "CAUGHT" if fire is not None else "MISSED"
+            vid = out / f"ep{ep}_{tag}_{outcome}.mp4"
             vw, H = None, 480
             for gi, s in enumerate(starts):
                 fired_yet = fire is not None and s >= fire

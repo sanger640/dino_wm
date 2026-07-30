@@ -988,3 +988,119 @@ No contrast between unsafe and safe.
 > smooth power law in the *mean* is compatible with strong per-direction nonlinearity. To ask
 > "is a linearisation valid", compare `J·δ` against `f(δ) − f(0)` at the operating scale.
 > Everything else is a proxy.
+
+### 7.19 Robust FTLE variants — the denominator has no salvageable value (`robust_ftle.py`)
+
+Five ways to keep the exponential-growth-rate idea while removing the fragility identified in
+§7.16 (d_start is 7x smaller than d_end, CV 0.42 vs 0.28, and carries same-direction signal at
+AUC 0.607 so dividing cancels signal). All on identical rollouts, k=30 mask, p90:
+
+| variant | p90 AUC |
+|---|---|
+| `ftle_2pt` (current) | 0.710 |
+| `ftle_2pt_median` | 0.701 |
+| **`ftle_slope`** (least-squares slope of log d(t) over all 9 timesteps) | **0.682** |
+| `ftle_slope_median` | 0.675 |
+| `ftle_slope_of_mean` | 0.692 |
+| `ftle_ratio_of_means` | 0.708 |
+| **`ftle_pooled_den`** (one median d_start per chunk) | **0.782** |
+| `ftle_shrunk_0.5x / 1x / 4x` | 0.713 / 0.716 / 0.747 |
+| `d_end` (reference) | **0.852** |
+
+**The slope fit — the most theoretically motivated variant — made things WORSE** (0.682 vs
+0.710). A least-squares slope of log d(t) assumes *exponential* growth; the divergence is
+sub-exponential (sigma-sweep slope +0.745, saturating at large sigma), so the model is
+misspecified and adding the early timesteps (smallest d, worst relative noise) hurts.
+**The "Lyapunov exponent" framing assumes dynamics this system does not have.**
+
+**Pooling the denominator is the real win: 0.710 -> 0.782.** One median d_start per chunk
+instead of per patch. Confirms the diagnosis exactly — per-patch denominator noise was the
+dominant cost — while preserving the log-ratio form.
+
+Full arc for the ratio: **0.599 -> 0.710 (mask) -> 0.782 (pooled denominator)**.
+
+> **The shrinkage sweep is the decisive diagnostic and it is monotonic:** 0.713 -> 0.716 ->
+> 0.747 as eps grows, heading to d_end's 0.852 at eps -> infinity. No intermediate optimum.
+> There is no normalisation sweet spot; the denominator is pure cost.
+
+`ftle_pooled_den` vs `d_end`: −0.069, CI [−0.138, +0.001], P(A>B) = 0.025.
+
+**Verdict.** If FTLE framing is wanted for the paper, use `ftle_pooled_den` — principled (one
+reference scale per chunk), keeps the exponential-rate form, and lifts 0.599 -> 0.782. But the
+case against the ratio is now consistent across **five independent tests**: sampled (§7.1),
+sampled with all fixes (§7.16), exact Jacobian (§7.17), shrinkage monotonicity (here), and
+robustification (here). The honest framing is that FTLE motivated the method and measurement
+showed its denominator subtracts signal.
+
+### 7.20 Pooled-denominator FTLE videos — the fix is partial (`metric_compare_video.py`)
+
+`ftle_pooled` (§7.19, AUC 0.782) rendered on the same ten episodes as `d_end` and `ftle`.
+Threshold p90 of its own safe distribution = 0.3985.
+
+| episode | topple | `ftle` | `ftle_pooled` |
+|---|---|---|---|
+| ep50 | 159 | 24 (135)* | 24 (135)* — unchanged |
+| ep54 | 72 | 0 (72)* | **miss** — spurious catch removed |
+| ep59 | 45 | 40 (5) | 40 (5) |
+| ep61 | 62 | miss | miss |
+| ep65 | 70 | 24 (46)* | 24 (46)* — unchanged |
+| ep78 / ep79 / ep82 | — | miss | miss |
+| ep51 | none | silent | silent |
+| ep52 | none | false alarm @112 | false alarm @72 |
+
+\* fired before anything happened. **`ftle` 4/8 → `ftle_pooled` 3/8 caught.**
+
+Pooling removed **one of three** spurious early alarms. That splits the denominator problem:
+
+- **per-patch noise** — pooling fixes it; this is the 0.710 → 0.782 gain
+- **quiet chunks have small denominators** — structural, survives pooling. Early in an
+  episode the arm is far from the blocks, so `d_start` is *genuinely* small at chunk level,
+  and dividing by it inflates the score precisely where nothing is happening. Same mechanism
+  as `d_start` carrying same-direction signal (AUC 0.607 alone).
+
+> Higher AUC did NOT mean more topples caught: `ftle_pooled` (0.782) catches fewer than
+> `ftle` (0.710) on these ten. AUC ranks ~200 chunks globally; catch-count at a fixed
+> threshold on 8 failures is a far noisier statistic. Do not read 0.782 as "catches more".
+
+### 7.21 The "false alarms" are not arbitrary (`false_positive_probe.py`)
+
+`get_block_tilt` only measures `block_left` / `block_right`. The red **target** block is not
+tracked, so instability involving it is invisible to the label. On the success episodes
+rendered as videos, adjacent tilt peaks at 6.4–8.4 deg yet all three metrics fired.
+
+Tested without new simulation (which would be unreproducible — sim.py randomises block pose
+with no saved seed) by comparing ground-truth PIXEL motion at firing vs silent safe chunks.
+250 held-out safe chunks, p90 thresholds, 25 firings each:
+
+| metric | motion (fire) | motion (silent) | ratio | adj tilt (fire) | adj tilt (silent) |
+|---|---|---|---|---|---|
+| `d_end` | 1.445 | 0.689 | **2.10x** | **6.62°** | 1.92° |
+| `probe` | 1.146 | 0.722 | **1.59x** | **4.71°** | 2.13° |
+| `ftle_pooled` | 1.024 | 0.736 | 1.39x | 3.33° | 2.29° |
+
+Spatial spread of the firing patches (fixed camera, so patch index is a stable location):
+
+| metric | patches | row spread | col spread | centre |
+|---|---|---|---|---|
+| `probe` | 7.2 | 1.00 | 1.88 | (2, 7) |
+| `d_end` | 7.2 | 0.86 | 1.49 | (3, 6) |
+| `ftle_pooled` | 7.4 | 0.91 | 1.89 | (2, 5) |
+
+~7 of 84 patches, clustered within 1–2 patches on a 14x14 grid — the signature of a single
+object, not the sweeping arm (which would spread across many columns).
+
+**Conclusion.** Firing safe chunks contain 1.4–2.1x more real motion and 2.2–3.4x more
+adjacent-block tilt than silent ones, localised to a small fixed region. The binary
+topple/no-topple label scores a 15 deg wobble identically to a motionless scene, so
+**precision is understated** — the monitor is detecting a continuum the label discards.
+Not unlimited: 6.6 deg is real wobble, not a near-miss.
+
+Note the ordering: `d_end`'s false alarms are the most justified (2.10x, 6.62°) and
+`ftle_pooled`'s the least (1.39x, 3.33°), matching their AUC ordering. The better metric's
+mistakes are more defensible mistakes.
+
+**Instrumentation added for next time.** `sim.py` now tracks `block_middle` in
+`_record_ref_quats` and exposes `get_block_xy()`; `replay_noisy.py` records `tilt_middle`
+and `mid_xy` per waypoint. `block_middle` is deliberately NOT added to `check_failure` — the
+target block is meant to move, and counting it would corrupt the labels. A future
+regeneration can then test the target-block hypothesis directly instead of by inference.
