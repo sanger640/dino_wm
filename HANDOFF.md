@@ -234,6 +234,14 @@ the probe's 100% while using no tilt labels. Best F1 across configs: d_end/PC1 0
 Dataset caveat: probe numbers are on jenga_tilt_100, these on jenga_noise_50 -- compare AUC
 (scale-invariant), not raw F1/recall, across the two.
 
+**(p) PC1-masked videos confirm the gain concentrates on the hard cases.**
+Both d_end_pc1 and ftle_variance_pc1 catch 7/8 topples on the standard 10-episode set (vs
+low-norm d_end's 5/8). The two "flash topple" episodes from item (m) -- previously missed or
+caught by a 0.0001 margin -- are caught comfortably now (ftle_variance_pc1: lead 32 on ep78,
+lead 26 on ep82, 4x/2.6x the earlier margins). Neither PC1 metric dominates the other
+(ftle_variance_pc1 misses ep79, d_end_pc1 catches it) -- an ensemble of the two is a
+concrete, evidenced next step, not just a hunch.
+
 ## 5. Gotchas that have burned this project four times
 
 **Fifth: losing an hour of GPU compute to a post-hoc analysis bug.**

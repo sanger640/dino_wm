@@ -1373,3 +1373,38 @@ rows were not persisted to disk, that hour was unrecoverable and the run was red
 scratch with the bug fixed and a checkpoint (`.rows.pkl`) written immediately after the GPU
 pass, before any analysis code executes. **Any future full-corpus sweep should checkpoint
 raw per-chunk data before the analysis stage**, not just at the very end.
+
+### 7.30 PC1-masked videos confirm the AUC gain and localise it to the hard cases
+
+`pc1_metric_video.py`, same 10 episodes as every prior video batch. Full comparison:
+
+| episode | topple | `d_end_pc1` | low-norm `d_end` (earlier) | `ftle_variance_pc1` |
+|---|---|---|---|---|
+| ep50 | 159 | 128 (31) | 128 (31) | 128 (31) |
+| ep54 | 72 | 0 (72)* | miss | 64 (8) |
+| ep59 | 45 | 40 (5) | miss | 40 (5) |
+| ep61 | 62 | 56 (6) | 48 (14) | 48 (14) |
+| ep65 | 70 | 56 (14) | 64 (6) | 64 (6) |
+| **ep78 (flash topple)** | 96 | 80 (16) | 88 (8) | **64 (32)** |
+| ep79 | 58 | 48 (10) | miss | miss |
+| **ep82 (flash topple)** | 74 | 56 (18) | 64 (10, 0.0001 margin) | **48 (26)** |
+| ep51 | none | false alarm @48 | false alarm @48 | false alarm @56 |
+| ep52 | none | false alarm @56 | -- | false alarm @56 |
+
+\* fires at step 0, before anything happens -- the same spurious-trigger artifact seen with
+unmasked `ftle`; metric-specific to `d_end` under this mask, since `ftle_variance_pc1`
+catches the same episode properly (halt 64, lead 8).
+
+**Both PC1-masked metrics catch 7/8 topples**, up from low-norm `d_end`'s 5/8 -- matching
+section 7.29's AUC gain in actual behaviour, not just a summary statistic.
+
+**The two "flash topple" episodes from section 7.27 (ep78, ep82 -- zero precursor wobble,
+previously missed or caught by a coin-flip margin) are where the improvement concentrates.**
+`ftle_variance_pc1` reaches lead 32 on ep78 (4x the earlier low-norm-mask lead of 8) and
+lead 26 on ep82 (2.6x the earlier 10, which itself was a 0.0001-margin near-miss). This is
+evidence PC1 masking isolates real signal these episodes actually contain, rather than
+just shifting the threshold.
+
+**Neither metric dominates**: `ftle_variance_pc1` misses ep79 (`d_end_pc1` catches it, lead
+10). An ensemble of the two -- still on the open list from earlier -- would plausibly do
+better than either alone, and this table is direct evidence for it.
