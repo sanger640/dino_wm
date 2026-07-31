@@ -242,6 +242,19 @@ lead 26 on ep82, 4x/2.6x the earlier margins). Neither PC1 metric dominates the 
 (ftle_variance_pc1 misses ep79, d_end_pc1 catches it) -- an ensemble of the two is a
 concrete, evidenced next step, not just a hunch.
 
+**(q) PC1 needs the geometric row mask -- it cannot replace it.** Fit across ALL 196
+patches (no row prior), PC1 keeps 99.9% of ceiling rows and 100% of floor rows -- agreement
+with the hand-coded mask is 17.9%, BELOW the ~46% chance level. Forced to discard most of
+the actually-relevant middle band instead (~58% of it). On 10 fresh held-out episodes,
+ftle_variance under this PC1-alone masking catches only 2/7 topples (29%), down from 7/8
+(88%) in the properly-masked version. Likely cause: the fg_sign heuristic (higher mean
+||z|| = foreground) was only validated where floor/ceiling were absent from the fit; the
+checkered floor's high-contrast texture plausibly outscores the flatter blocks/arm on raw
+magnitude, flipping the sign -- the same texture-vs-relevance trap that sank the earlier
+occupancy-based content mask. Every validated PC1 gain in this project comes from PC1
+refining which of the row-mask's 84 patches matter, not from independently discovering
+scene structure. State this precisely; do not describe PC1 as replacing the row mask.
+
 ## 5. Gotchas that have burned this project four times
 
 **Fifth: losing an hour of GPU compute to a post-hoc analysis bug.**

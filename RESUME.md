@@ -1408,3 +1408,56 @@ just shifting the threshold.
 **Neither metric dominates**: `ftle_variance_pc1` misses ep79 (`d_end_pc1` catches it, lead
 10). An ensemble of the two -- still on the open list from earlier -- would plausibly do
 better than either alone, and this table is direct evidence for it.
+
+### 7.31 PC1 cannot replace the hand-coded row mask on its own -- it needs it
+
+Direct test (`pc1_probe_triple_video.py`): fit the PCA basis across ALL 196 patches (every
+earlier script fit it only on the already-row-filtered 84, so PC1 never saw the ceiling/
+floor at all) and let PC1 alone decide keep/drop, with NO geometric prior.
+
+**Diagnostic, before any video:**
+
+```
+PC1-alone vs hand-coded row mask: 17.9% agreement    (chance level ~46%, since the
+                                                       mask keeps 43% and PC1 keeps 75%)
+ceiling rows (0-1) PC1 drops on its own: 0.1%
+floor rows (8-13) PC1 drops on its own:  0.0%
+```
+
+PC1 keeps essentially ALL ceiling and floor patches. Since it can only keep 75% overall,
+that forces it to discard most of the genuinely task-relevant middle band (rows 2-7)
+instead -- arithmetic: ceiling+floor = 112/196 patches kept, leaving only ~35 of the
+remaining 84 middle-band patches kept (~42%), i.e. discarding ~58% of the actually relevant
+region. 17.9% agreement is BELOW chance -- this is closer to inverted than neutral.
+
+**10 new held-out episodes (89, 93, 94, 95, 96, 98, 99, 53, 55, 56 -- none used in any
+earlier video batch), probe vs ftle_variance under this PC1-alone masking:**
+
+| episode | probe | ftle_variance (PC1-alone) |
+|---|---|---|
+| ep89/93/95/99 | caught (lead 3-12) | MISS |
+| ep94/96 | caught (lead 3-4) | caught (lead 43-44) |
+| ep98 | miss | miss |
+| ep53/55/56 (safe) | false alarm x3 | false alarm x3 |
+
+**ftle_variance catches only 2/7 topples (29%) under PC1-alone masking, down from 7/8 (88%)
+in the properly-masked version (section 7.30).** False-alarm rate is unchanged (both
+recalibrated to their own p90 by construction), so this is a pure recall collapse, not a
+threshold artifact. The calibrated threshold itself also jumped 0.0211 -> 0.0532 (2.5x),
+consistent with the score now being dominated by noise from the reinstated ceiling/floor
+rather than genuine signal.
+
+**Likely mechanism.** The sign heuristic (fg_sign = side of PC1 with higher mean ||z||) was
+only ever validated where PC1 was fit on the pre-filtered 84 patches -- arm/table only,
+floor/ceiling never present. Given the whole image, the checkered floor's high-contrast
+repeating pattern plausibly produces LARGER feature magnitude than the comparatively flat
+blocks and arm -- the same texture-vs-relevance confusion that sank the naive
+occupancy-based content mask in `content_mask_study.py` (floor occupancy 72 vs blocks
+11-19). If so, the norm-based sign rule picks the wrong side as "foreground" once the
+floor is included in the fit.
+
+**Conclusion: the hand-coded geometric row mask is NOT redundant with PC1 -- it is load-
+bearing.** Every validated PC1 gain in this project (section 7.29's 0.894/0.896 AUC) came
+from PC1 refining WHICH of the already-plausible 84 patches matter most, operating INSIDE
+the geometric prior -- not from PC1 independently rediscovering scene structure. Do not
+describe "PC1 masking" as replacing the row mask; it supplements it and requires it.
