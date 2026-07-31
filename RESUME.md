@@ -1325,3 +1325,51 @@ fully reset after a resolved wobble (episode 60, the dominant contributor). The 
 genuine property of the probe worth fixing -- e.g. an explicit decay/reset term, or
 including "recently disturbed but now settled" examples in the probe's training data -- not
 merely a calibration artifact to shrug off.
+
+### 7.29 PC1 mask validated on the FULL corpus — beats the low-norm mask, replace it
+
+Resolves the open caveat from section 7.24: same procedure (20 episode splits, mask params
+selected on train, scored on test) but on the full 1772-chunk corpus instead of the
+225-chunk subsample. `pc1_mask_full_corpus.py`. Also benchmarks `ftle_variance` (section
+7.23) under the same three masks, since it is free once the rollouts are computed.
+
+| | d_end held-out AUC | ftle_variance held-out AUC |
+|---|---|---|
+| unmasked | 0.756 | 0.784 |
+| low-norm (k=30) | 0.854 (matches section 7.2's 0.848) | 0.838 |
+| **PC1 (75%)** | **0.894** | **0.896** |
+
+**PC1 beats the low-norm mask on the full corpus, on both metrics** (+0.039 on `d_end`,
++0.058 on `ftle_variance`) -- not sample-size inflation this time; low-norm reproduces
+section 7.2 almost exactly, confirming the pipeline. **PC1 masking should replace the
+low-norm mask as production default.**
+
+Operating points (thresholds = percentile of safe-chunk scores, full corpus, 25 unsafe /
+1747 safe):
+
+| metric / mask | best F1 | best recall (any threshold) |
+|---|---|---|
+| `d_end` unmasked | 0.163 @p95 | 0.640 @p75 |
+| `d_end` low-norm | 0.148 @p95 | 0.760 @p75 |
+| **`d_end` PC1** | **0.177 @p95** | **0.840 @p75** |
+| `ftle_variance` unmasked | 0.148 @p95 | 0.600 |
+| `ftle_variance` low-norm | 0.113 @p90 | 0.720 |
+| **`ftle_variance` PC1** | 0.130 @p85 | **0.960 @p75, 0.920 @p80** |
+
+PC1-masked `ftle_variance` at p80 catches 92% of all topples -- the strongest recall of any
+divergence-based configuration measured this session, closing most of the gap to the probe's
+perfect recall (section 7.16/7.22, 100% @p75-p80) while using no tilt labels at all.
+
+> **Dataset caveat for any probe comparison.** Probe operating points (section 7.16) are on
+> `jenga_tilt_100` (799 chunks, 15 unsafe, 1.9% base rate); these PC1 numbers are on
+> `jenga_noise_50` (1772 chunks, 25 unsafe, 1.4% base rate). The AUC comparison
+> (probe 0.941 vs PC1 d_end/ftle_variance ~0.89) is the fair read since it is scale-invariant;
+> the F1/recall table is "same shape of result," not strict apples-to-apples.
+
+**Debugging note:** the first attempt at this script crashed the analysis stage AFTER the
+full ~1h GPU pass completed (`zo[0]` retained an extra time dimension instead of indexing a
+single timestep -- `zo = zv[0:1]` keeps T, so `zo[0]` is `(T,P,F)` not `(P,F)`). Since raw
+rows were not persisted to disk, that hour was unrecoverable and the run was redone from
+scratch with the bug fixed and a checkpoint (`.rows.pkl`) written immediately after the GPU
+pass, before any analysis code executes. **Any future full-corpus sweep should checkpoint
+raw per-chunk data before the analysis stage**, not just at the very end.

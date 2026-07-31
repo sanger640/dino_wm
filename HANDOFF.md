@@ -225,7 +225,19 @@ side -- transient noise, minor contributor (dropping it moves p95 by only 0.5 de
 sustained pattern (ep60-type) is the dominant driver and is worth fixing directly (e.g. a
 decay term, or training examples of "recently disturbed but now settled" states).
 
+**(o) PC1 mask validated on the FULL corpus -- replace the low-norm mask.**
+`pc1_mask_full_corpus.py`, 20 episode splits, 1772 chunks: PC1(75%) beats low-norm(k=30) on
+BOTH d_end (0.894 vs 0.854 held-out AUC) and ftle_variance (0.896 vs 0.838) -- not
+sample-size inflation this time; low-norm reproduces section 7.2's 0.848 almost exactly.
+PC1-masked ftle_variance @p80 catches 92% of topples (recall), closing most of the gap to
+the probe's 100% while using no tilt labels. Best F1 across configs: d_end/PC1 0.177 @p95.
+Dataset caveat: probe numbers are on jenga_tilt_100, these on jenga_noise_50 -- compare AUC
+(scale-invariant), not raw F1/recall, across the two.
+
 ## 5. Gotchas that have burned this project four times
+
+**Fifth: losing an hour of GPU compute to a post-hoc analysis bug.**
+`pc1_mask_full_corpus.py`'s first attempt crashed AFTER the full ~1h rollout pass finished (`zo[0]` kept an extra time dim instead of indexing one timestep) -- raw rows were never checkpointed, so the GPU work was unrecoverable and had to be redone. Lesson: checkpoint raw per-chunk data to disk immediately after any expensive GPU pass, before analysis code runs.
 
 **Silent failures where the artifact looks complete.** In order of discovery:
 1. `show_preview` — AttributeError swallowed by a bare `except` → 0 frames/episode.
