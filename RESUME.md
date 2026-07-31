@@ -1261,3 +1261,67 @@ the probe's percentiles unstable under resampling.
 **Trade-off to state plainly in the paper:** the probe discriminates best (AUC 0.941) but is
 the least reliable of the four to calibrate from limited held-out data. A single calibration
 run on this system could hand you a materially wrong threshold.
+
+### 7.27 Miss analysis: ep78 and ep82 are "flash topples" with no precursor signal
+
+Both consistently missed by the probe across every threshold tested (section 7.16, 7.22),
+and by `d_end` on one of the two. Full pre-failure trajectory (not just the tail):
+
+**ep78**: tilt flat at 0.0 deg for 80 steps, then in the single TERMINAL chunk:
+0.0 -> 7.6 deg (observed) -> 90 deg (predicted horizon). Max tilt anywhere in the entire
+pre-failure history: **7.6 deg**.
+
+**ep82**: flat at 0.0 deg for 56 steps, then 0.0 -> 10.8 -> 85.1 in one window. Max tilt
+anywhere pre-failure: **10.8 deg**.
+
+For comparison, section 7.21's *unjustified* false alarms averaged 6.62 deg adjacent-block
+tilt. The state immediately preceding these catastrophic falls is LESS extreme than plenty
+of chunks the monitor correctly ignores elsewhere -- nothing in the 3 observed frames
+visually distinguishes "about to fall in 8 steps" from ordinary wobble.
+
+Contrast with caught episodes: **ep65** ramps clearly across consecutive chunks before the
+fall (probe: 1.4 -> -3.4 -> -0.0 -> 2.7 -> 17.5 -> 78.6). **ep50** is caught via an EARLIER,
+separate wobble bout (tilt to 10 deg, three chunks before the actual fall) that happens to
+trip the alarm, even though its terminal event is equally instantaneous (0 -> 90 deg in one
+window) -- the catch is opportunistic, not a detection of the actual falling mechanism.
+
+`d_end` catches ep78 comfortably (0.0788 vs threshold 0.0605) but ep82 by the barest
+possible margin (0.0606 vs 0.0605, a difference of 0.0001). The probe misses both, further
+below threshold in each case (9.32 and 11.07 vs 12.78).
+
+**Conclusion: a genuine information limit, not a metric weakness.** Given a 3-frame
+observation window and 8-step horizon, a fast physical event with zero visible run-up
+cannot be forecast by construction -- there is nothing to detect. Distinct from section
+7.7's "fires with the topple, not before it": that finding was about aggregate ranking of
+chunks WITH some precursor signal; this is about chunks with NONE. No metric tuning closes
+this gap; only a longer horizon or higher sampling rate could, and only if the precursor is
+visually detectable before the block starts moving at all.
+
+### 7.28 Why the probe's threshold is unstable: two distinct mechanisms, one dominant
+
+Diagnosed directly from `metric_family_eval.json`'s cached per-chunk scores (no new GPU
+run). Distribution of probe scores on the 784 safe chunks: mean 4.57, median 2.75, std 9.95,
+**skewness 2.64, excess kurtosis 10.84** -- a heavily right-tailed, non-normal distribution.
+
+**Episode 60 alone supplies 15 of the top 39 scores (38% of the entire top-5% tail)**, and
+it is a real, sustained behavioural pattern rather than noise: tilt wobbles to 13 deg around
+step 112-136, settles back to a flat 0 by step 176 -- and the probe's prediction never
+recovers, staying at 25-53 deg for the final 14 consecutive chunks after the true tilt is
+already zero. This directly explains section 7.25's calibration bias (the 30-45 deg
+predicted bin averaging only ~9 deg actual): episode 60-type chunks are a large part of that
+bin's mass. Because it is sustained rather than a one-off, this pattern would recur on any
+calibration sample that happens to include an episode like it -- it is a property of the
+representation after a resolved disturbance, not sampling luck.
+
+**Episode 76 shows a different failure**: one isolated single-chunk spike (probe=75.38 at
+one step, the highest value across all 784 safe chunks) surrounded by otherwise normal
+values immediately before and after. Dropping this single episode barely moves the
+threshold (p95: 23.10 -> 22.60) -- transient single-frame noise, cheap to average away and
+not the dominant driver.
+
+**Two distinct mechanisms feed the heavy tail**: transient single-frame noise (episode 76,
+minor contributor) and sustained post-disturbance drift where the latent state does not
+fully reset after a resolved wobble (episode 60, the dominant contributor). The second is a
+genuine property of the probe worth fixing -- e.g. an explicit decay/reset term, or
+including "recently disturbed but now settled" examples in the probe's training data -- not
+merely a calibration artifact to shrug off.

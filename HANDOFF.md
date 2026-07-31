@@ -205,6 +205,26 @@ ftle_pooled's CV 0.01. AUC 0.941 is real and the ranking is trustworthy; the raw
 NOT an interpretable degree estimate, and a single calibration run could hand you a
 materially wrong threshold.
 
+**(m) The two consistent probe misses (ep78, ep82) are "flash topples" -- a genuine
+information limit, not a metric weakness.** Tilt is flat at 0 deg for 56-80 steps, then in
+the SINGLE terminal 8-step chunk: 0 -> 7.6-10.8 deg (observed) -> 85-90 deg (predicted
+horizon). Max tilt anywhere pre-failure is BELOW the 6.62 deg average of section 7.21's
+false alarms -- nothing in the 3 observed frames distinguishes these from ordinary wobble.
+Caught episodes ramp visibly across chunks (ep65) or get caught via an earlier, separate
+wobble bout (ep50) that has nothing to do with the actual falling mechanism. No metric
+tuning fixes this; only a longer horizon or higher sampling rate could, and only if the
+precursor is visually detectable at all.
+
+**(n) The probe's threshold instability (item l) has two causes, diagnosed from cached
+scores.** Episode 60 alone supplies 38% of the top-5% tail: tilt wobbles to 13 deg then
+settles to 0 by step 176, but the probe's prediction STAYS at 25-53 deg for the final 14
+consecutive chunks -- a real, sustained failure to reset after a resolved disturbance, not
+noise (explains the calibration bias in item l directly). Episode 76 contributes one isolated
+single-chunk spike (75.38, the highest of all 784 safe chunks) with normal values on either
+side -- transient noise, minor contributor (dropping it moves p95 by only 0.5 deg). The
+sustained pattern (ep60-type) is the dominant driver and is worth fixing directly (e.g. a
+decay term, or training examples of "recently disturbed but now settled" states).
+
 ## 5. Gotchas that have burned this project four times
 
 **Silent failures where the artifact looks complete.** In order of discovery:
