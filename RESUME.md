@@ -1493,3 +1493,60 @@ only variable changed. On three episodes (94, 96, 89) the properly-masked ftle_v
 halts at the EXACT same step as the probe. On ep98 it catches a topple the probe misses
 entirely. Same-episode, same-rollout confirmation of section 7.29's full-corpus AUC result
 and section 7.31's negative result, together in one place.
+
+### 7.33 CORRECTION: the "PC1 foreground mask" was inverted -- it selects background, and that is why it works
+
+**User caught this by visual inspection of the rendered videos: the green (kept) patches
+were all on the table, none on the blocks.** Confirmed directly (`pc1_check.png` diagnostic
+frame): blocks/gripper coloured RED (dropped), blank table GREEN (kept). Every PC1 script
+since section 7.15 (`pca_mask_combo.py`, `pca_mask_heldout.py`, `pc1_metric_video.py`,
+`pc1_mask_full_corpus.py`, `pc1_probe_triple_video.py`) determined `fg_sign` by an
+ASSUMPTION -- "whichever side of PC1 has higher mean ||z|| is foreground" -- that was never
+independently checked against ground truth.
+
+**Checked directly against ground-truth motion, two independent datasets:**
+```
+corr(PC1_raw, motion), jenga_tilt_100  (23520 patches, 30 episodes) = -0.479
+corr(PC1_raw, motion), jenga_noise_50  (50400 patches, 600 chunks)  = -0.486
+```
+Both strongly negative and mutually consistent: high PC1 (the norm heuristic's "foreground")
+actually means LOW motion. The norm-based sign was backwards. Visually confirmed after
+flipping (`pc1_check_corrected.png`): blocks/gripper now green, table mostly red.
+
+**Redone: section 7.29's full-corpus headline result, both signs, identical checkpointed
+rollouts** (`pc1_sign_fix_and_rerun.py` -- reused `pc1_mask_full_corpus.py`'s checkpointed
+raw rows, no GPU repass needed; only the sign changed):
+
+| | buggy sign (kept BACKGROUND) | corrected sign (kept true FOREGROUND) | diff |
+|---|---|---|---|
+| `d_end` | **0.894** (matches section 7.29 exactly) | 0.714 | **-0.179** |
+| `ftle_variance` | **0.895** (matches section 7.29 exactly) | 0.743 | **-0.153** |
+
+**The "buggy" configuration is the better one, by a large and consistent margin on both
+metrics.** Reference: low-norm mask (section 7.2) = 0.848. Background-selection beats it
+(+0.05); true-foreground-selection loses to it (-0.13).
+
+**Why this is not paradoxical.** This is consistent with the project's oldest finding:
+`d_end`-family metrics track ordinary MOTION, not instability specifically (patch-level AUC
+0.957 vs ground-truth motion, section 7.9). The arm and blocks move constantly during a
+normal successful pick -- large, expected, mostly uninformative. The buggy sign accidentally
+excluded exactly that noisy benign-motion region and kept the quieter background, where
+subtler cues (shadow, reflection, partial occlusion shifting near a wobbling block) carry a
+cleaner signal than the loud but mostly-benign motion of the arm itself.
+
+**What this means for every PC1 result in sections 7.15-7.32.** The MEASURED NUMBERS all
+stand as reported (they are what was actually computed and rendered). What was WRONG is the
+INTERPRETIVE LABEL: every description of "PC1 selects foreground / task-relevant patches"
+should read "PC1 selects the BACKGROUND region, and that turns out to be more informative
+than the foreground region for this divergence-based signal." This is not a minor wording
+fix -- it changes the causal story from "attend to what matters" to "exclude the noisy,
+expected motion and let a subtler background signal through," which is a different and
+arguably more interesting finding. `fg_sign`/`PC1_PCT` naming in the surviving scripts should
+be read accordingly (PC1_PCT=75 keeps the LOW-motion 75%, not the high-content 75%).
+
+**Action taken:** `pc1_sign_fix_and_rerun.py` fixes the sign determination going forward
+(ground-truth-motion-derived, not norm-assumed) and is the reference implementation. The
+production recommendation (row mask + PC1 refinement) is UNCHANGED in mechanism -- keep
+using the already-validated (buggy-sign-in-name-only, background-selecting) configuration,
+since it is the one that was measured to work. Only the WRITE-UP needs correcting, not the
+deployed mask itself.

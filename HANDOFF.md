@@ -255,6 +255,23 @@ occupancy-based content mask. Every validated PC1 gain in this project comes fro
 refining which of the row-mask's 84 patches matter, not from independently discovering
 scene structure. State this precisely; do not describe PC1 as replacing the row mask.
 
+**(r) CORRECTION: the "PC1 foreground mask" (items o-q) is INVERTED -- it selects
+BACKGROUND, and that is why it works.** User caught this from the rendered videos: green
+(kept) patches were all on the table, none on the blocks. Confirmed: corr(PC1_raw, motion)
+= -0.479 (jenga_tilt_100) and -0.486 (jenga_noise_50) -- the norm-based fg_sign heuristic
+("higher ||z|| = foreground") was backwards on BOTH datasets, never independently checked
+against ground truth. Redone with the corrected sign on section 7.29's exact checkpointed
+data: d_end 0.894 (buggy, kept background) vs 0.714 (corrected, kept true foreground) --
+corrected is WORSE by 0.18. Same pattern on ftle_variance (0.895 vs 0.743). The buggy
+(background-keeping) configuration is genuinely the better one -- consistent with the
+project's oldest finding that d_end-family metrics track ordinary motion, not instability
+(patch AUC 0.957 vs GT motion, item covered in RESUME 7.9): excluding the loud, mostly-
+benign arm/block motion and keeping the quieter background apparently surfaces a cleaner
+signal (shadow/reflection/occlusion shifts) than the foreground itself. MEASURED NUMBERS in
+items (o)-(q) all stand; only the INTERPRETIVE LABEL is wrong -- "PC1 selects the
+background, not the foreground" is the corrected story. Do not "fix" the sign in the
+deployed config; the validated (background-selecting) version is the one to keep using.
+
 ## 5. Gotchas that have burned this project four times
 
 **Fifth: losing an hour of GPU compute to a post-hoc analysis bug.**
