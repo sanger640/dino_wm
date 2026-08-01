@@ -1461,3 +1461,35 @@ bearing.** Every validated PC1 gain in this project (section 7.29's 0.894/0.896 
 from PC1 refining WHICH of the already-plausible 84 patches matter most, operating INSIDE
 the geometric prior -- not from PC1 independently rediscovering scene structure. Do not
 describe "PC1 masking" as replacing the row mask; it supplements it and requires it.
+
+### 7.32 Direct before/after: PC1-alone vs row-mask+PC1, identical episodes and rollouts
+
+`pc1_probe_triple_video.py` rerun with the masking reverted to the validated configuration
+(geometric row mask first, PC1 refining within it -- matching pc1_metric_video.py exactly),
+on the SAME 10 episodes as section 7.31's PC1-alone test (89,93,94,95,96,98,99,53,55,56).
+Threshold reproduced exactly (0.0211, matching section 7.30's separate fit on a different
+episode set) -- confirms the pipeline is deterministic and reproducible.
+
+| episode | probe | ftle_variance, PC1-alone (7.31) | ftle_variance, row-mask+PC1 |
+|---|---|---|---|
+| ep89 | caught (12) | miss | **caught (12)** -- matches probe exactly |
+| ep93 | caught (4) | miss | miss |
+| ep94 | caught (4) | caught (44) | **caught (4)** -- matches probe exactly |
+| ep95 | caught (10) | miss | **caught (82)*** |
+| ep96 | caught (3) | caught (43) | **caught (3)** -- matches probe exactly |
+| ep98 | miss | miss | **caught (10)** -- beats the probe |
+| ep99 | caught (9) | miss | **caught (25)** |
+| ep53/55/56 (safe) | false alarm x3 | false alarm x3 | false alarm x3 |
+
+\* verified against the raw tilt trace: genuine signal (tilt rises to 9.7 deg around steps
+72-104, settles to 0, then the block falls at step 146), but the halt is catching an
+EARLIER, separate wobble bout rather than directly forecasting the specific final fall --
+the same opportunistic-catch pattern documented for ep50 in section 7.27, not 82 steps of
+direct foresight into this topple.
+
+**ftle_variance recovers from 2/7 (PC1-alone) to 6/7 (row-mask+PC1)** -- a complete reversal
+using identical rollouts, identical thresholds, identical random seeds; masking order is the
+only variable changed. On three episodes (94, 96, 89) the properly-masked ftle_variance_pc1
+halts at the EXACT same step as the probe. On ep98 it catches a topple the probe misses
+entirely. Same-episode, same-rollout confirmation of section 7.29's full-corpus AUC result
+and section 7.31's negative result, together in one place.

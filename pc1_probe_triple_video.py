@@ -3,21 +3,21 @@ Three panels per episode, on 10 held-out episodes not used in any earlier video 
 
   1. camera feed, HALT status band for each metric
   2. the SAME frame with a colour-coded 14x14 patch grid:
+         black  = dropped by the fixed geometric row-mask (ceiling/floor rows 0,1,8-13)
          green  = kept (foreground by PC1, counts toward the score)
-         red    = dropped by PC1 (background)
+         red    = dropped by PC1 within the row-masked 84 patches (background)
          bright outline = the single WORST patch this chunk (argmax ftle_variance),
                           the same localisation server_single_max.py exposes as
                           max_patch_idx for the original FTLE -- ftle_variance is patch-wise
                           until the p90 reduction, so this costs nothing extra
-
-  NO HAND-CODED ROW MASK THIS TIME. Every earlier script fit PC1 only on the
-  already-geometrically-filtered 84 patches (rows 2-7), so PC1 never even SAW the
-  ceiling/floor rows and could not have judged them either way. Here the PCA basis is fit
-  on ALL 196 patches and the keep/drop decision is made across all 196 by PC1 alone, to see
-  whether it independently rediscovers "ceiling and floor are irrelevant" -- a genuine test
-  of whether PC1 can replace the hand-coded row mask, not just supplement it.
   3. probe (left axis, degrees) and ftle_variance_pc1 (right axis) plotted together against
      ground-truth tilt, each with its own p90 safe-calibrated threshold and halt marker
+
+  THIS IS THE VALIDATED CONFIGURATION (section 7.29/7.30): PC1 refines WHICH of the
+  row-mask's 84 patches matter most, operating INSIDE the geometric prior, not replacing
+  it. Section 7.31 showed PC1 alone (no row mask) fails badly on these same 10 episodes
+  (2/7 topples caught vs the properly-masked 7/8) -- this run is the direct counterpart on
+  the identical episode set for side-by-side comparison.
 
 IMPORTANT what PC1 masking actually does: perturbations act on the ROBOT'S ACTIONS, not on
 patches -- every patch is perturbed identically because the whole scene rolls forward under
@@ -51,7 +51,7 @@ NH, NP, GRID = 3, 8, 14
 dev = "cuda"
 TOPPLE = 45.0
 PC1_PCT = 75
-EPISODES = ["89", "93", "94", "95", "96", "98", "99", "53", "55", "56"]   # 7 new fails + 3 new ok
+EPISODES = ["89", "93", "94", "95", "96", "98", "99", "53", "55", "56"]   # same set as the PC1-alone run
 
 
 def dec(b):
@@ -83,8 +83,8 @@ def main():
     ap.add_argument("--n-fit-episodes", type=int, default=50)
     ap.add_argument("--lam", type=float, default=10.0)
     ap.add_argument("--fps", type=int, default=15)
-    ap.add_argument("--outdir", default="/home/sanger/wksp/panda_express/results/pc1_probe_videos")
-    ap.add_argument("--basis-out", default="outputs/pc1_probe_basis.pkl")
+    ap.add_argument("--outdir", default="/home/sanger/wksp/panda_express/results/pc1_probe_videos_combined")
+    ap.add_argument("--basis-out", default="outputs/pc1_probe_basis_combined.pkl")
     args = ap.parse_args()
     N = args.n_perturb
     out = Path(args.outdir); out.mkdir(parents=True, exist_ok=True)
@@ -176,28 +176,21 @@ def main():
             if i % 10 == 0:
                 print(f"  [{i}/{len(held)}] safe chunks={len(safe_fv)}", flush=True)
 
-        # fit on ALL 196 patches -- no geometric pre-filter, so PC1 gets a fair shot at
-        # rows it was never allowed to see in any earlier script
-        bank = np.concatenate([z for z in safe_zobs], 0)
+        # geometric row mask FIRST (validated config): PC1 is fit only on the already
+        # row-filtered 84 patches and refines within them, exactly like pc1_metric_video.py
+        bank = np.concatenate([z[keep] for z in safe_zobs], 0)
         mu = bank.mean(0)
         _, S, Vt = np.linalg.svd(bank - mu, full_matrices=False)
-        pc1_all = np.concatenate([(z - mu) @ Vt[0] for z in safe_zobs])
-        nrm_all = np.concatenate(safe_norm)
+        pc1_all = np.concatenate([((z - mu) @ Vt[0])[keep] for z in safe_zobs])
+        nrm_all = np.concatenate([nn[keep] for nn in safe_norm])
         fg_sign = 1 if nrm_all[pc1_all > np.median(pc1_all)].mean() > \
                        nrm_all[pc1_all <= np.median(pc1_all)].mean() else -1
 
         def pc1_mask(z_obs):
             pc1 = ((z_obs - mu) @ Vt[0]) * fg_sign
-            return pc1 >= np.percentile(pc1, 100 - PC1_PCT)   # over all 196, PC1 alone decides
-
-        # diagnostic: how much does PC1-alone agree with the hand-coded row mask?
-        row_kept = build_patch_keep_mask(196, torch.device("cpu")).numpy()
-        agree = np.mean([np.mean(pc1_mask(z) == row_kept) for z in safe_zobs[:50]])
-        top_rows_dropped = np.mean([1 - pc1_mask(z)[:2*GRID].mean() for z in safe_zobs[:50]])
-        floor_rows_dropped = np.mean([1 - pc1_mask(z)[8*GRID:14*GRID].mean() for z in safe_zobs[:50]])
-        print(f"PC1-alone vs hand-coded row mask: {agree*100:.1f}% patch-level agreement")
-        print(f"  fraction of ceiling rows (0-1) PC1 drops on its own: {top_rows_dropped*100:.1f}%")
-        print(f"  fraction of floor rows (8-13) PC1 drops on its own:  {floor_rows_dropped*100:.1f}%")
+            m = keep.copy()
+            m &= pc1 >= np.percentile(pc1[keep], 100 - PC1_PCT)
+            return m
 
         def score(v, mask):
             x = v[mask]; x = x[np.isfinite(x)]
@@ -300,25 +293,28 @@ def main():
                     plot = np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()
                     plt.close(fig)
 
-                    # panel 2: PC1-alone patch mask overlay -- NO hand-coded row exclusion.
-                    # every patch is either green (PC1 top-75%, kept) or red (bottom-25%,
-                    # dropped); if PC1 rediscovers the ceiling/floor as background on its
-                    # own, those rows should show up red here without ever being told to.
+                    # panel 2: geometric row mask + PC1 refinement (the validated config)
                     base = cv2.resize(crop(im, 224), (H, H))
                     overlay = base.copy()
                     cell = H // GRID
+                    row_mask_keep = build_patch_keep_mask(196, torch.device("cpu")).numpy()
                     for p in range(196):
                         r_, c_ = p // GRID, p % GRID
                         x0, y0 = c_ * cell, r_ * cell
-                        col = (40, 180, 60) if m[p] else (200, 50, 50)
+                        if not row_mask_keep[p]:
+                            col = (30, 30, 30)
+                        elif m[p]:
+                            col = (40, 180, 60)
+                        else:
+                            col = (200, 50, 50)
                         cv2.rectangle(overlay, (x0, y0), (x0 + cell, y0 + cell), col, -1)
                     panel2 = cv2.addWeighted(overlay, 0.35, base, 0.65, 0)
                     wr, wc = wp // GRID, wp % GRID
                     cv2.rectangle(panel2, (wc * cell, wr * cell),
                                  (wc * cell + cell, wr * cell + cell), (255, 230, 0), 3)
-                    cv2.putText(panel2, "green=kept by PC1 alone  red=dropped by PC1 alone",
+                    cv2.putText(panel2, "green=foreground(kept) red=background(dropped)",
                                 (6, H - 22), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
-                    cv2.putText(panel2, "(no hand-coded row mask)  yellow=worst patch",
+                    cv2.putText(panel2, "black=geometric mask  yellow=worst patch",
                                 (6, H - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
 
                     # panel 1: camera feed with halt bands
