@@ -272,6 +272,16 @@ items (o)-(q) all stand; only the INTERPRETIVE LABEL is wrong -- "PC1 selects th
 background, not the foreground" is the corrected story. Do not "fix" the sign in the
 deployed config; the validated (background-selecting) version is the one to keep using.
 
+**(s) Foreground PC1, properly tuned, still loses to background -- not a fluke of an
+unfair 75% comparison.** pc1_sign_sweep_compare.py swept keep-% (10-100) per sign with
+proper held-out selection: background confirmed optimal at 75% (20/20 splits, both
+metrics, unchanged at 0.894/0.895). Foreground improves to 0.745/0.779 (from 0.714/0.743 at
+a borrowed 75%) but its own optimum is essentially NO PC1 filtering at all (100% keep
+chosen 17-19/20 splits) -- matching the plain row-mask baseline exactly. Ensembling both
+(max, z-scored) scores 0.864/0.878, WORSE than background alone. The investigation is
+exhaustive now: background-selecting PC1 at 75% is the best configuration found across the
+alternative sign, its own percentage space, and a combination of both.
+
 ## 5. Gotchas that have burned this project four times
 
 **Fifth: losing an hour of GPU compute to a post-hoc analysis bug.**

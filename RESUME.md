@@ -1550,3 +1550,43 @@ production recommendation (row mask + PC1 refinement) is UNCHANGED in mechanism 
 using the already-validated (buggy-sign-in-name-only, background-selecting) configuration,
 since it is the one that was measured to work. Only the WRITE-UP needs correcting, not the
 deployed mask itself.
+
+### 7.34 Properly-tuned foreground vs background PC1 -- the comparison is exhaustive now, not just at a borrowed percentage
+
+Section 7.33 compared both signs at a FIXED 75% keep, a value originally selected via
+held-out cross-validation FOR the background-keeping direction (section 7.24: 75% chosen
+20/20 splits under that sign) and never re-tuned for foreground. This closes that gap:
+`pc1_sign_sweep_compare.py` sweeps keep-percentage (10/25/40/50/60/75/90/100) separately per
+sign, with proper held-out selection (percentage picked on train half, scored on test half,
+20 episode splits), reusing the same checkpointed rollouts -- no GPU pass needed.
+
+| | fixed @75% (7.33) | properly tuned | optimal % (mode across splits) |
+|---|---|---|---|
+| background, d_end | 0.894 | **0.894** | 75 (20/20 splits) |
+| background, ftle_variance | 0.895 | **0.895** | 75 (20/20 splits) |
+| foreground, d_end | 0.714 | **0.745** | **100** (17/20 splits) |
+| foreground, ftle_variance | 0.743 | **0.779** | **100** (19/20 splits) |
+| ensemble (max, z-scored) | -- | 0.864 / 0.878 | -- |
+
+**Background's 75% is confirmed optimal, not a lucky guess** -- proper tuning picks the
+identical value in every single split, on both metrics.
+
+**Foreground improves with proper tuning (+0.03) but its own optimum is essentially "apply
+no PC1 filtering at all."** 17-19 of 20 splits pick 100% keep -- i.e. the row mask alone,
+no PC1 exclusion. This exactly matches section 7.29's unmasked-row-mask-only baseline
+(0.756/0.784); foreground-tuned (0.745/0.779) sits right at that number, pulled down only by
+the rare split that tries a smaller percentage and does worse. Any further exclusion of
+"background-looking" patches under the foreground direction actively hurts performance --
+checked exhaustively across the full percentage range, not missed by an unlucky single point.
+
+**Ensembling does not rescue foreground either.** max(z-scored background, z-scored
+foreground) = 0.864/0.878 -- WORSE than background alone. A component carrying no real
+signal beyond noise dilutes the clean one when combined via max (which only raises the
+false-alarm surface, since either side firing counts).
+
+**Closing verdict on the PC1 sign investigation (sections 7.29, 7.33, 7.34 together):**
+background-selecting PC1 at 75% keep is not a lucky artifact of an unfair comparison -- it
+remains the best configuration found across an exhaustive sweep of the alternative
+direction, its own percentage space, and a combination of both. Nothing found in this
+follow-up changes the production recommendation from section 7.33: keep the validated
+(background-selecting) configuration.
